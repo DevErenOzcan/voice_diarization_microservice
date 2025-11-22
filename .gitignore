@@ -1,0 +1,9 @@
+.idea/
+
+frontend/.idea/
+frontend/node_modules/
+
+gateway/.idea/
+
+whisperX/.idea/
+whisperX/.env/
