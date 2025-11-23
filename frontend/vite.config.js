@@ -8,6 +8,10 @@ export default defineConfig({
   server: {
     port: 3000, // Frontend servisi genelde 3000 portunda çalışır
     proxy: {
+        '/api': {
+            target: 'http://localhost:8080',
+            changeOrigin: true,
+        },
         '/ws': {
             target: 'ws://localhost:8080',
             ws: true,

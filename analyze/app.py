@@ -185,43 +185,41 @@ def analyze():
         if not data:
             return jsonify({"error": "Veri bulunamadı"}), 400
 
-        # Go'daki struct yapısı:
-        # SegmentID, WavFile ([]byte -> base64 string), Text, Language vb.
         segment_id = data.get('segment_id')
         wav_base64 = data.get('wav_file')
         text = data.get('text', '')
         language = data.get('language', '')
 
+        # GÜNCELLEME: Start ve End değerlerini al (Go'dan hesaplanmış olarak geliyor)
+        start = data.get('start', 0.0)
+        end = data.get('end', 0.0)
+
         if not wav_base64:
             return jsonify({"error": "wav_file eksik"}), 400
 
-        # 1. Base64 Decode (Go []byte json olarak base64 string gönderir)
         wav_bytes = base64.b64decode(wav_base64)
-
-        # 2. Feature Extraction
         features = extract_features_from_bytes(wav_bytes, sr=16000)
-
-        # 3. DataFrame Oluşturma (Eski kodla uyumlu sütun isimleri)
         columns = get_column_names()
 
-        # Sütun sayısı kontrolü (Opsiyonel güvenlik)
         if len(features) != len(columns):
             logging.warning(f"Feature sayısı uyuşmazlığı! Beklenen: {len(columns)}, Çıkan: {len(features)}")
-            # Burada hata döndürmek yerine devam ediyoruz ama logluyoruz.
 
         df = pd.DataFrame([features], columns=columns)
 
-        # 4. Tahminleme
+        # Go tarafı "VoiceSentiment" bekliyor, değişken ismini değiştirmeseniz bile
+        # JSON response içinde key'i değiştireceğiz.
         audio_sentiment = predict_sentiment(df)
 
-        logging.info(f"Segment: {segment_id} | Tahmin: {audio_sentiment} | Text: {text}")
+        logging.info(f"Segment: {segment_id} | Tahmin: {audio_sentiment} | Start: {start}")
 
-        # 5. Yanıt
+        # GÜNCELLEME: Yanıta start, end ve voice_sentiment ekle
         response = {
             "segment_id": segment_id,
             "text": text,
-            "audio_sentiment": audio_sentiment,
+            "voice_sentiment": audio_sentiment, # Go struct'ındaki json tag'i ile uyumlu olmalı
             "language": language,
+            "start": start, # Go'ya geri gönderiyoruz
+            "end": end,     # Go'ya geri gönderiyoruz
             "status": "success"
         }
 
