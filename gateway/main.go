@@ -90,7 +90,21 @@ func sendToAnlyzeService(payload AnalyzePayload) {
 	}
 	defer resp.Body.Close()
 
-	log.Printf("Veri gönderildi -> ID: %s, Text: %s", payload.SegmentID, payload.Text)
+	// Yanıt gövdesini oku
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Response body okuma hatası: %v", err)
+		return
+	}
+
+	// Durum kodu 200 (OK) değilse hata olarak logla
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("AnalyzeService hata döndürdü (%s): %s", resp.Status, string(body))
+		return
+	}
+
+	// Başarılı yanıtı string olarak yazdır
+	log.Printf("Analyze Servis Yanıtı: %s", string(body))
 }
 
 func sendToWhisperxService(sessionID string, pcmData []byte, chunkIndex int) {
