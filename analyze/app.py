@@ -34,7 +34,7 @@ class MLModels:
                     model_dir = env_model_dir
                 logging.info(f"ANALYZE_MODEL_DIR provided, using: {model_dir}")
             else:
-                model_dir = os.path.join(base_dir, 'models')
+                model_dir = os.path.join(base_dir, './../models/old')
                 logging.info(f"ANALYZE_MODEL_DIR not set, defaulting to: {model_dir}")
 
             scaler_path = os.path.join(model_dir, 'scaler.pkl')
