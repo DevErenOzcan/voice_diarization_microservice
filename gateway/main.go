@@ -3,17 +3,20 @@ package main
 import (
 	"bytes"
 	"database/sql"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os" // Dosya işlemleri için eklendi
+	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
-	_ "github.com/mattn/go-sqlite3" // SQLite Sürücüsü
+	_ "github.com/mattn/go-sqlite3"
 	"github.com/maxhawkins/go-webrtcvad"
 )
 
@@ -28,9 +31,11 @@ const (
 	AnalyzeServiceURL = "http://localhost:5001/"
 	BytesPerSecond    = SampleRate * (BitDepth / 8) * Channels
 	DBName            = "db.sqlite"
+	RecordDir         = "record_matches" // Kayıt klasörü
 )
 
-// ... Structlar ... (Aynen korunuyor, DB için bir iki ekleme yapıldı)
+// ... Structlar ...
+
 type IncomingJSONMessage struct {
 	Type string          `json:"type"`
 	Data json.RawMessage `json:"data"`
@@ -39,6 +44,12 @@ type IncomingJSONMessage struct {
 type WSResponse struct {
 	Type    string      `json:"type"`
 	Payload interface{} `json:"payload"`
+}
+
+type CreateUserPayload struct {
+	Name        string `json:"name"`
+	Surname     string `json:"surname"`
+	AudioBase64 string `json:"audio_base64"`
 }
 
 type FrontendAnalysisResult struct {
@@ -57,7 +68,7 @@ type WhisperAPIResponse struct {
 
 type AnalyzePayload struct {
 	SegmentID      string  `json:"segment_id,omitempty"`
-	RecordID       string  `json:"record_id,omitempty"` // DB İlişkisi için
+	RecordID       string  `json:"record_id,omitempty"`
 	WavFile        []byte  `json:"wav_file,omitempty"`
 	Text           string  `json:"text"`
 	Start          float64 `json:"start"`
@@ -68,7 +79,6 @@ type AnalyzePayload struct {
 	Speaker        string  `json:"speaker,omitempty"`
 }
 
-// Frontend Records Sayfası İçin Model
 type DBRecord struct {
 	ID        string   `json:"id"`
 	Date      string   `json:"date"`
@@ -94,38 +104,56 @@ var upgrader = websocket.Upgrader{
 }
 
 var httpClient = &http.Client{Timeout: 60 * time.Second}
-var db *sql.DB // Global DB bağlantısı
+var db *sql.DB
 
-// --- VERİTABANI İŞLEMLERİ ---
+// --- VERİTABANI VE DOSYA SİSTEMİ İŞLEMLERİ ---
 
 func initDB() {
+	// 1. Klasör Kontrolü / Oluşturma
+	if _, err := os.Stat(RecordDir); os.IsNotExist(err) {
+		log.Printf("Klasör oluşturuluyor: %s", RecordDir)
+		if err := os.MkdirAll(RecordDir, 0755); err != nil {
+			log.Fatal("Klasör oluşturma hatası:", err)
+		}
+	}
+
+	// 2. DB Bağlantısı
 	var err error
 	db, err = sql.Open("sqlite3", DBName)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	// Tabloları Oluştur
 	createRecordsTable := `
-	CREATE TABLE IF NOT EXISTS records (
-		id TEXT PRIMARY KEY,
-		date DATETIME,
-		topic TEXT DEFAULT 'Genel',
-		sentiment TEXT DEFAULT 'Nötr'
-	);`
+    CREATE TABLE IF NOT EXISTS records (
+       id TEXT PRIMARY KEY,
+       date DATETIME,
+       topic TEXT DEFAULT 'Genel',
+       sentiment TEXT DEFAULT 'Nötr'
+    );`
 
 	createSegmentsTable := `
-	CREATE TABLE IF NOT EXISTS segments (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		record_id TEXT,
-		start_offset REAL,
-		end_offset REAL,
-		text TEXT,
-		text_sentiment TEXT,
-		voice_sentiment TEXT,
-		speaker TEXT,
-		FOREIGN KEY(record_id) REFERENCES records(id)
-	);`
+    CREATE TABLE IF NOT EXISTS segments (
+       id INTEGER PRIMARY KEY AUTOINCREMENT,
+       record_id TEXT,
+       start_offset REAL,
+       end_offset REAL,
+       text TEXT,
+       text_sentiment TEXT,
+       voice_sentiment TEXT,
+       speaker TEXT,
+       FOREIGN KEY(record_id) REFERENCES records(id)
+    );`
+
+	// DEĞİŞİKLİK: voice_sample (BLOB) yerine voice_path (TEXT) yaptık
+	createUsersTable := `
+    CREATE TABLE IF NOT EXISTS users (
+       id INTEGER PRIMARY KEY AUTOINCREMENT,
+       name TEXT,
+       surname TEXT,
+       voice_path TEXT, 
+       created_at DATETIME
+    );`
 
 	if _, err := db.Exec(createRecordsTable); err != nil {
 		log.Fatal(err)
@@ -133,6 +161,10 @@ func initDB() {
 	if _, err := db.Exec(createSegmentsTable); err != nil {
 		log.Fatal(err)
 	}
+	if _, err := db.Exec(createUsersTable); err != nil {
+		log.Fatal(err)
+	}
+
 	log.Println("Veritabanı ve tablolar hazır.")
 }
 
@@ -143,7 +175,6 @@ func saveRecord(id string) {
 		return
 	}
 	defer stmt.Close()
-	// Tarihi basit string formatında kaydedelim
 	_, err = stmt.Exec(id, time.Now().Format("2006-01-02 15:04:05"))
 	if err != nil {
 		log.Println("Record kayıt hatası:", err)
@@ -152,9 +183,9 @@ func saveRecord(id string) {
 
 func saveSegment(p AnalyzePayload) {
 	stmt, err := db.Prepare(`
-		INSERT INTO segments(record_id, start_offset, end_offset, text, text_sentiment, voice_sentiment, speaker) 
-		values(?, ?, ?, ?, ?, ?, ?)
-	`)
+       INSERT INTO segments(record_id, start_offset, end_offset, text, text_sentiment, voice_sentiment, speaker) 
+       values(?, ?, ?, ?, ?, ?, ?)
+    `)
 	if err != nil {
 		log.Println("DB Prepare Error:", err)
 		return
@@ -167,9 +198,8 @@ func saveSegment(p AnalyzePayload) {
 	}
 }
 
-// --- API HANDLERS (Frontend Veri Çekme) ---
+// --- API HANDLERS ---
 
-// Records Sayfası İçin Veri
 func getRecordsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Content-Type", "application/json")
@@ -188,21 +218,16 @@ func getRecordsHandler(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// Ekstra Bilgiler (Konuşmacıları ve Süreyi bulmak için sub-query yapılabilir ama basit tutuyoruz)
-		// Şimdilik mock veri veya basit SQL ile dolduruyoruz:
-		r.Duration = "00:00"                // SQL ile hesaplanabilir: max(end_offset)
-		r.Speakers = []string{"Bilinmiyor"} // SQL distinct speaker query yapılabilir
-
-		// Gerçek Süreyi Hesapla
 		var maxEnd float64
 		_ = db.QueryRow("SELECT MAX(end_offset) FROM segments WHERE record_id = ?", r.ID).Scan(&maxEnd)
+
+		r.Duration = "00:00"
 		if maxEnd > 0 {
 			mins := int(maxEnd) / 60
 			secs := int(maxEnd) % 60
 			r.Duration = fmt.Sprintf("%02d:%02d", mins, secs)
 		}
 
-		// Konuşmacıları bul
 		speakerRows, _ := db.Query("SELECT DISTINCT speaker FROM segments WHERE record_id = ?", r.ID)
 		var speakers []string
 		if speakerRows != nil {
@@ -215,6 +240,7 @@ func getRecordsHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			speakerRows.Close()
 		}
+		r.Speakers = []string{"Bilinmiyor"}
 		if len(speakers) > 0 {
 			r.Speakers = speakers
 		}
@@ -225,13 +251,10 @@ func getRecordsHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(records)
 }
 
-// Segments Sayfası İçin Veri
 func getSegmentsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Content-Type", "application/json")
 
-	// URL'den ID'yi al (basit parsing, router kullanmadığımız için)
-	// /api/records/sess_123/segments şeklinde bekliyoruz ama query param daha kolay: /api/segments?id=sess_123
 	recordID := r.URL.Query().Get("id")
 
 	rows, err := db.Query("SELECT start_offset, end_offset, text, speaker, text_sentiment, voice_sentiment FROM segments WHERE record_id = ? ORDER BY start_offset ASC", recordID)
@@ -251,7 +274,8 @@ func getSegmentsHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(segments)
 }
 
-// ... Yardımcı Fonksiyonlar (Aynı) ...
+// ... Yardımcı Fonksiyonlar ...
+
 func writeWavHeader(w io.Writer, dataLength int) error {
 	fileSize := dataLength + 36
 	buf := new(bytes.Buffer)
@@ -272,7 +296,6 @@ func writeWavHeader(w io.Writer, dataLength int) error {
 	return err
 }
 
-// ... sendToAnlyzeService (DB Kaydı Eklendi) ...
 func sendToAnlyzeService(payload AnalyzePayload, wsConn *ThreadSafeConn) {
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
@@ -306,15 +329,12 @@ func sendToAnlyzeService(payload AnalyzePayload, wsConn *ThreadSafeConn) {
 		return
 	}
 
-	// EKSİK BİLGİLERİ TAMAMLA (Python servisinden dönmeyebilir)
-	analyzedResult.RecordID = payload.RecordID // ID'yi koru
-	analyzedResult.Start = payload.Start       // Zamanı koru
-	analyzedResult.End = payload.End           // Zamanı koru
+	analyzedResult.RecordID = payload.RecordID
+	analyzedResult.Start = payload.Start
+	analyzedResult.End = payload.End
 
-	// --- DB'YE KAYDET (Yeni Adım) ---
 	saveSegment(analyzedResult)
 
-	// Frontend'e gönder
 	frontendPayload := FrontendAnalysisResult{
 		Start:          analyzedResult.Start,
 		End:            analyzedResult.End,
@@ -390,7 +410,6 @@ func createAnalyzePayload(sessionID string, pcmData []byte, chunkIndex int, resu
 			wavBuffer.Write(segmentPCM)
 		}
 
-		// Record ID'yi burada sete diyoruz (SessionID ile aynı)
 		segment.RecordID = sessionID
 		segment.SegmentID = fmt.Sprintf("%s_%d_%d", sessionID, chunkIndex, i)
 		segment.WavFile = wavBuffer.Bytes()
@@ -410,18 +429,90 @@ func handleJSONMessage(msg []byte, wsConn *ThreadSafeConn) {
 		log.Println("JSON parse hatası:", err)
 		return
 	}
+
 	switch req.Type {
 	case "create_user":
-		log.Printf("Yeni kullanıcı isteği: %s", string(req.Data))
-		wsConn.WriteJSON(WSResponse{Type: "notification", Payload: "Kullanıcı başarıyla oluşturuldu (Gateway Mock)"})
+		// 1. Veriyi struct'a al
+		var payload CreateUserPayload
+		if err := json.Unmarshal(req.Data, &payload); err != nil {
+			log.Printf("CreateUser payload hatası: %v", err)
+			wsConn.WriteJSON(WSResponse{Type: "error", Payload: "Geçersiz veri formatı"})
+			return
+		}
+
+		// 2. Base64 verisini çöz (Frontend'den gelen dosya verisi)
+		fileBytes, err := base64.StdEncoding.DecodeString(payload.AudioBase64)
+		if err != nil {
+			log.Printf("Base64 decode hatası: %v", err)
+			wsConn.WriteJSON(WSResponse{Type: "error", Payload: "Ses dosyası çözülemedi"})
+			return
+		}
+
+		// 3. Dosyayı Diske Kaydet
+		// Not: Tarayıcılar genelde WebM formatında kayıt yapar.
+		// Bu yüzden uzantıyı .webm veriyoruz. (WAV header'ı EKLEMİYORUZ çünkü dosya zaten formatlı geliyor)
+		// Frontend artık gerçek WAV gönderiyor, uzantıyı .wav yapıyoruz.
+		filename := fmt.Sprintf("user_%d_%s.wav", time.Now().Unix(), payload.Name)
+		filePath := filepath.Join(RecordDir, filename)
+
+		// Direkt byte'ları yazıyoruz (Header ekleme yok!)
+		if err := os.WriteFile(filePath, fileBytes, 0644); err != nil {
+			log.Printf("Dosya yazma hatası: %v", err)
+			wsConn.WriteJSON(WSResponse{Type: "error", Payload: "Dosya kaydedilemedi"})
+			return
+		}
+
+		// 4. Veritabanına dosya yolunu kaydet
+		stmt, err := db.Prepare("INSERT INTO users(name, surname, voice_path, created_at) values(?, ?, ?, ?)")
+		if err != nil {
+			log.Printf("DB Prepare hatası: %v", err)
+			return
+		}
+		defer stmt.Close()
+
+		res, err := stmt.Exec(payload.Name, payload.Surname, filePath, time.Now().Format("2006-01-02 15:04:05"))
+		if err != nil {
+			log.Printf("DB Kayıt hatası: %v", err)
+			wsConn.WriteJSON(WSResponse{Type: "error", Payload: "Veritabanı hatası"})
+			return
+		}
+
+		lastID, _ := res.LastInsertId()
+		log.Printf("Kullanıcı oluşturuldu: %s (Dosya: %s)", payload.Name, filePath)
+
+		// Başarılı mesajı gönder
+		wsConn.WriteJSON(WSResponse{
+			Type:    "notification",
+			Payload: fmt.Sprintf("Kullanıcı ve ses kaydı başarıyla oluşturuldu. (ID: %d)", lastID),
+		})
+
 	case "get_users":
-		// İstersen burayı da DB'den çekecek şekilde güncelleyebilirsin
-		users := []map[string]string{{"id": "1", "name": "Test", "surname": "User", "date": "2025-01-01"}}
+		// ... (Burada değişiklik yok, önceki kodun aynısı) ...
+		rows, err := db.Query("SELECT id, name, surname, created_at FROM users ORDER BY created_at DESC")
+		if err != nil {
+			log.Printf("Liste hatası: %v", err)
+			return
+		}
+		defer rows.Close()
+
+		var users []map[string]interface{}
+		for rows.Next() {
+			var id int
+			var name, surname, createdAt string
+			if err := rows.Scan(&id, &name, &surname, &createdAt); err != nil {
+				continue
+			}
+			users = append(users, map[string]interface{}{
+				"id":      id,
+				"name":    name,
+				"surname": surname,
+				"date":    createdAt,
+			})
+		}
 		wsConn.WriteJSON(WSResponse{Type: "users_list", Payload: users})
 	}
 }
 
-// ... WS Handler ...
 func wsHandler(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -432,11 +523,9 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	safeConn := &ThreadSafeConn{Conn: conn}
 	defer conn.Close()
 
-	// OTURUM ID OLUŞTURMA
 	sessionID := fmt.Sprintf("sess_%d", time.Now().UnixNano())
 	log.Printf("Oturum başladı: %s", sessionID)
 
-	// --- DB'YE YENİ KAYIT AÇ ---
 	go saveRecord(sessionID)
 
 	v, err := webrtcvad.New()
@@ -511,15 +600,11 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	// DB Başlat
 	initDB()
 
-	// WebSocket Endpoint
 	http.HandleFunc("/ws", wsHandler)
-
-	// API Endpoints (Frontend için)
 	http.HandleFunc("/api/records", getRecordsHandler)
-	http.HandleFunc("/api/segments", getSegmentsHandler) // Kullanım: /api/segments?id=sess_...
+	http.HandleFunc("/api/segments", getSegmentsHandler)
 
 	log.Println("Gateway başlatıldı (8080)...")
 	log.Println("API Endpoints: /api/records, /api/segments")
