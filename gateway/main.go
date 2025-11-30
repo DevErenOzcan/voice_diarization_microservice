@@ -10,7 +10,7 @@ import (
 )
 
 func main() {
-	// 1. Veritabanını Başlat
+	// 1. Veritabanını Başlat (GORM)
 	database.Init()
 
 	// 2. Rotaları Tanımla

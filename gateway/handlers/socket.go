@@ -30,7 +30,12 @@ func HandleLiveAudio(w http.ResponseWriter, r *http.Request) {
 	sessionID := fmt.Sprintf("sess_%d", time.Now().Unix())
 	log.Printf("Canlı analiz başladı: %s", sessionID)
 
-	database.DB.Exec("INSERT INTO records(id, date) values(?, ?)", sessionID, time.Now().Format("2006-01-02 15:04:05"))
+	// Session kaydını oluştur
+	newRecord := models.Record{
+		ID:   sessionID,
+		Date: time.Now(),
+	}
+	database.DB.Create(&newRecord)
 
 	vad, _ := webrtcvad.New()
 	vad.SetMode(3)
@@ -122,9 +127,17 @@ func processAndRespond(recordID string, pcmData []byte, offset float64, conn *we
 		finalStart := offset + seg.Start
 		finalEnd := offset + seg.End
 
-		database.DB.Exec(`INSERT INTO segments(record_id, start_offset, end_offset, text, text_sentiment, voice_sentiment, speaker) 
-				 values(?, ?, ?, ?, ?, ?, ?)`,
-			recordID, finalStart, finalEnd, analyzeResp.Text, analyzeResp.TextSentiment, analyzeResp.VoiceSentiment, analyzeResp.Speaker)
+		// Veritabanına segmenti kaydet (GORM)
+		newSegment := models.Segment{
+			RecordID:       recordID,
+			StartOffset:    finalStart,
+			EndOffset:      finalEnd,
+			Text:           analyzeResp.Text,
+			TextSentiment:  analyzeResp.TextSentiment,
+			VoiceSentiment: analyzeResp.VoiceSentiment,
+			Speaker:        analyzeResp.Speaker,
+		}
+		database.DB.Create(&newSegment)
 
 		response := map[string]interface{}{
 			"type": "live_analysis",

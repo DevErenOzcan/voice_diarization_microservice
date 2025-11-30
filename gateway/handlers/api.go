@@ -17,27 +17,18 @@ import (
 func HandleGetUsers(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	rows, err := database.DB.Query("SELECT id, name, surname, created_at FROM users ORDER BY created_at DESC")
-	if err != nil {
+	var users []models.User
+	// CreatedAt tarihine göre tersten sırala ve getir
+	if err := database.DB.Order("created_at desc").Find(&users).Error; err != nil {
 		http.Error(w, err.Error(), 500)
 		return
-	}
-	defer rows.Close()
-
-	var users []models.User
-	for rows.Next() {
-		var u models.User
-		// Hata kontrolü eklenebilir
-		rows.Scan(&u.ID, &u.Name, &u.Surname, &u.Date)
-		users = append(users, u)
 	}
 	json.NewEncoder(w).Encode(users)
 }
 
 // POST /api/record_user
 func HandleRecordUser(w http.ResponseWriter, r *http.Request) {
-	// 10MB limit
-	r.ParseMultipartForm(10 << 20)
+	r.ParseMultipartForm(10 << 20) // 10MB limit
 
 	name := r.FormValue("name")
 	surname := r.FormValue("surname")
@@ -48,10 +39,9 @@ func HandleRecordUser(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	// Dosyayı diske kaydet
 	filename := fmt.Sprintf("user_%d_%s%s", time.Now().Unix(), name, filepath.Ext(header.Filename))
 	if filepath.Ext(header.Filename) == "" {
-		filename += ".wav" // Varsayılan uzantı
+		filename += ".wav"
 	}
 	fullPath := filepath.Join(models.RecordDir, filename)
 
@@ -60,18 +50,22 @@ func HandleRecordUser(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Dosya kaydedilemedi", 500)
 		return
 	}
-	defer outFile.Close() // Fonksiyon bitince dosyayı kapat
+	defer outFile.Close()
 
 	if _, err := io.Copy(outFile, file); err != nil {
 		http.Error(w, "Dosya yazılamadı", 500)
 		return
 	}
 
-	// DB'ye kaydet
-	_, err = database.DB.Exec("INSERT INTO users(name, surname, voice_path, created_at) values(?, ?, ?, ?)",
-		name, surname, fullPath, time.Now().Format("2006-01-02 15:04:05"))
+	// GORM ile Kaydet
+	user := models.User{
+		Name:      name,
+		Surname:   surname,
+		VoicePath: fullPath,
+		// CreatedAt GORM tarafından otomatik set edilir
+	}
 
-	if err != nil {
+	if result := database.DB.Create(&user); result.Error != nil {
 		http.Error(w, "Veritabanı hatası", 500)
 		return
 	}
@@ -84,42 +78,38 @@ func HandleRecordUser(w http.ResponseWriter, r *http.Request) {
 func HandleGetRecords(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	rows, err := database.DB.Query("SELECT id, date, topic FROM records ORDER BY date DESC")
-	if err != nil {
+	var records []models.Record
+	// Kayıtları tarihe göre sırala
+	if err := database.DB.Order("date desc").Find(&records).Error; err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	defer rows.Close()
 
-	var records []models.Record
-	for rows.Next() {
-		var rec models.Record
-		rows.Scan(&rec.ID, &rec.Date, &rec.Topic)
-
-		// Süreyi hesapla (Orijinal mantık: En son segmentin bitiş zamanı)
+	// Her kayıt için ek bilgileri (Süre ve Konuşmacılar) hesapla
+	for i := range records {
 		var maxEnd float64
-		// Null gelme ihtimaline karşı sql.NullFloat64 kullanılabilir ama basitleştirmek için:
-		err := database.DB.QueryRow("SELECT COALESCE(MAX(end_offset), 0) FROM segments WHERE record_id = ?", rec.ID).Scan(&maxEnd)
-		if err != nil {
-			maxEnd = 0
-		}
-		rec.Duration = fmt.Sprintf("%02d:%02d", int(maxEnd)/60, int(maxEnd)%60)
+		// En son segmentin bitiş zamanını bul
+		database.DB.Model(&models.Segment{}).
+			Where("record_id = ?", records[i].ID).
+			Select("COALESCE(MAX(end_offset), 0)").
+			Scan(&maxEnd)
 
-		// Konuşmacıları bul
-		sRows, _ := database.DB.Query("SELECT DISTINCT speaker FROM segments WHERE record_id = ?", rec.ID)
-		for sRows.Next() {
-			var s string
-			sRows.Scan(&s)
-			rec.Speakers = append(rec.Speakers, s)
-		}
-		sRows.Close()
+		records[i].Duration = fmt.Sprintf("%02d:%02d", int(maxEnd)/60, int(maxEnd)%60)
 
-		if len(rec.Speakers) == 0 {
-			rec.Speakers = []string{"Bilinmiyor"}
-		}
+		// Konuşmacıları bul (Tekrarsız)
+		var speakers []string
+		database.DB.Model(&models.Segment{}).
+			Distinct("speaker").
+			Where("record_id = ?", records[i].ID).
+			Pluck("speaker", &speakers)
 
-		records = append(records, rec)
+		if len(speakers) == 0 {
+			records[i].Speakers = []string{"Bilinmiyor"}
+		} else {
+			records[i].Speakers = speakers
+		}
 	}
+
 	json.NewEncoder(w).Encode(records)
 }
 
@@ -133,25 +123,32 @@ func HandleGetSegments(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := database.DB.Query(`SELECT start_offset, end_offset, text, speaker, text_sentiment, voice_sentiment 
-						   FROM segments WHERE record_id = ? ORDER BY start_offset ASC`, id)
+	var segments []models.Segment
+	err := database.DB.Where("record_id = ?", id).
+		Order("start_offset asc").
+		Find(&segments).Error
+
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	defer rows.Close()
 
-	var segments []models.LiveAnalysisResult
-	for rows.Next() {
-		var s models.LiveAnalysisResult
-		rows.Scan(&s.Start, &s.End, &s.Text, &s.Speaker, &s.TextSentiment, &s.VoiceSentiment)
-		segments = append(segments, s)
+	// Segment modelini frontend'in beklediği LiveAnalysisResult formatına çevir
+	var results []models.LiveAnalysisResult
+	for _, s := range segments {
+		results = append(results, models.LiveAnalysisResult{
+			Start:          s.StartOffset,
+			End:            s.EndOffset,
+			Text:           s.Text,
+			Speaker:        s.Speaker,
+			TextSentiment:  s.TextSentiment,
+			VoiceSentiment: s.VoiceSentiment,
+		})
 	}
 
-	// Eğer veri yoksa boş array dönmeli, null değil
-	if segments == nil {
-		segments = []models.LiveAnalysisResult{}
+	if results == nil {
+		results = []models.LiveAnalysisResult{}
 	}
 
-	json.NewEncoder(w).Encode(segments)
+	json.NewEncoder(w).Encode(results)
 }
