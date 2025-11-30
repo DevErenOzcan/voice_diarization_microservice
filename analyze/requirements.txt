@@ -1,0 +1,10 @@
+flask
+numpy
+pandas
+librosa
+tensorflow
+joblib
+tpot
+scikit-learn
+soundfile
+setuptools
