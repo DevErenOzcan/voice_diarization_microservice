@@ -8,6 +8,7 @@ import librosa
 import tensorflow as tf
 from flask import Flask, request, jsonify
 from joblib import load
+from speaker_recognition import SpeakerRecognition
 
 # Loglama ayarları
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -15,19 +16,16 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 app = Flask(__name__)
 
 # --- Modelleri Yükleme ---
-# Global değişkenler olarak tanımlıyoruz, uygulama başlarken hafızaya alınacaklar.
 class MLModels:
     def __init__(self):
         logging.info("Modeller yükleniyor...")
         try:
-            # GPU kullanımını kapat (CPU tabanlı inference genellikle production için daha stabil olabilir)
+            # GPU kullanımını kapat
             tf.config.set_visible_devices([], 'GPU')
 
-            # Resolve models directory: support env override for flexibility in different runtimes
             base_dir = os.path.dirname(os.path.abspath(__file__))
             env_model_dir = os.getenv('ANALYZE_MODEL_DIR')
             if env_model_dir:
-                # If env var is relative, treat it relative to this file
                 if not os.path.isabs(env_model_dir):
                     model_dir = os.path.join(base_dir, env_model_dir)
                 else:
@@ -42,35 +40,31 @@ class MLModels:
             label_encoder_path = os.path.join(model_dir, 'label_encoder.pkl')
             best_model_path = os.path.join(model_dir, 'best_model.keras')
 
-            logging.info(f"Model dizini: {model_dir}")
-
-            # Check files exist and raise a clear error if not
+            # Check files
             missing = [p for p in (scaler_path, selector_path, label_encoder_path, best_model_path) if not os.path.exists(p)]
             if missing:
                 logging.error("Aşağıdaki model dosyaları bulunamadı:")
                 for m in missing:
                     logging.error(f"  - {m}")
-                raise FileNotFoundError(f"Eksik model dosyaları: {missing}")
-
-            self.scaler = load(scaler_path)
-            self.selector = load(selector_path)
-            self.label_encoder = load(label_encoder_path)
-            self.best_model = tf.keras.models.load_model(best_model_path)
-            logging.info("Tüm modeller başarıyla yüklendi.")
+                self.sentiment_models_loaded = False
+            else:
+                self.scaler = load(scaler_path)
+                self.selector = load(selector_path)
+                self.label_encoder = load(label_encoder_path)
+                self.best_model = tf.keras.models.load_model(best_model_path)
+                self.sentiment_models_loaded = True
+                logging.info("Sentiment modelleri başarıyla yüklendi.")
         except Exception as e:
             logging.error(f"Model yükleme hatası: {e}")
-            raise e
+            self.sentiment_models_loaded = False
 
 # Modelleri başlat
 models = MLModels()
+speaker_recognition = SpeakerRecognition()
 
 # --- Yardımcı Fonksiyonlar ---
 
 def get_column_names():
-    """
-    consumers.py dosyasındaki sütun isimleri mantığının birebir aynısı.
-    Selector'un doğru çalışması için bu sıralama hayati önem taşır.
-    """
     columns = (
             ['zero_crossing', 'centroid_mean', 'rolloff_mean', 'bandwidth_mean'] +
             [f'contrast_mean_{i}' for i in range(7)] +
@@ -86,14 +80,8 @@ def get_column_names():
     return columns
 
 def extract_features_from_bytes(wav_bytes, sr=16000):
-    """
-    Librosa kullanarak byte verisinden öznitelik çıkarır.
-    Eski projedeki 'extract_features' fonksiyonunun aynısıdır.
-    """
     try:
-        # Byte verisini sanal dosya olarak oku
         with io.BytesIO(wav_bytes) as wav_buffer:
-            # Go tarafı 16000 sample rate ile gönderiyor
             audio, sample_rate = librosa.load(wav_buffer, sr=sr)
 
         # 1. Zero Crossing Rate
@@ -136,7 +124,6 @@ def extract_features_from_bytes(wav_bytes, sr=16000):
         # 9. Energy
         energy = np.sum(audio ** 2)
 
-        # Vektör birleştirme (Sıralama çok önemli)
         features = np.hstack([
             zero_crossing, spectral_centroid, spectral_rolloff, spectral_bandwidth,
             contrast_mean, contrast_std, chroma_stft_mean, chroma_stft_std,
@@ -144,39 +131,26 @@ def extract_features_from_bytes(wav_bytes, sr=16000):
             poly_mean, mfcc_mean, mfcc_std, energy
         ])
 
-        return features
+        return features, audio, sample_rate
 
     except Exception as e:
         logging.error(f"Öznitelik çıkarma hatası: {e}")
         raise e
 
 def predict_sentiment(df_features):
-    """
-    Oluşturulan DataFrame üzerinden model tahminlemesi yapar.
-    """
+    if not models.sentiment_models_loaded:
+        return "ModelNotLoaded"
     try:
-        # 1. Selector ile özellikleri seç
         new_features = df_features[models.selector].values
-
-        # 2. Scaler ile ölçeklendir
         new_features_scaled = models.scaler.transform(new_features)
-
-        # 3. CNN için Reshape (samples, features, 1)
         new_features_scaled = new_features_scaled.reshape(new_features_scaled.shape[0], new_features_scaled.shape[1], 1)
-
-        # 4. Tahmin
         predictions = models.best_model.predict(new_features_scaled, verbose=0)
-
-        # 5. Label Decoding
         predicted_classes = np.argmax(predictions, axis=1)
         predicted_labels = models.label_encoder.inverse_transform(predicted_classes)
-
-        return predicted_labels[0] # Tek bir sonuç dönüyoruz
-
+        return predicted_labels[0]
     except Exception as e:
         logging.error(f"Tahminleme hatası: {e}")
         return "Error"
-
 
 @app.route('/', methods=['POST'])
 def analyze():
@@ -189,8 +163,6 @@ def analyze():
         wav_base64 = data.get('wav_file')
         text = data.get('text', '')
         language = data.get('language', '')
-
-        # GÜNCELLEME: Start ve End değerlerini al (Go'dan hesaplanmış olarak geliyor)
         start = data.get('start', 0.0)
         end = data.get('end', 0.0)
 
@@ -198,7 +170,7 @@ def analyze():
             return jsonify({"error": "wav_file eksik"}), 400
 
         wav_bytes = base64.b64decode(wav_base64)
-        features = extract_features_from_bytes(wav_bytes, sr=16000)
+        features, audio, sample_rate = extract_features_from_bytes(wav_bytes, sr=16000)
         columns = get_column_names()
 
         if len(features) != len(columns):
@@ -206,20 +178,21 @@ def analyze():
 
         df = pd.DataFrame([features], columns=columns)
 
-        # Go tarafı "VoiceSentiment" bekliyor, değişken ismini değiştirmeseniz bile
-        # JSON response içinde key'i değiştireceğiz.
         audio_sentiment = predict_sentiment(df)
 
-        logging.info(f"Segment: {segment_id} | Tahmin: {audio_sentiment} | Start: {start}")
+        # Predict Speaker
+        speaker = speaker_recognition.predict(audio, sample_rate)
 
-        # GÜNCELLEME: Yanıta start, end ve voice_sentiment ekle
+        logging.info(f"Segment: {segment_id} | Tahmin: {audio_sentiment} | Speaker: {speaker}")
+
         response = {
             "segment_id": segment_id,
             "text": text,
-            "voice_sentiment": audio_sentiment, # Go struct'ındaki json tag'i ile uyumlu olmalı
+            "voice_sentiment": audio_sentiment,
+            "speaker": speaker,
             "language": language,
-            "start": start, # Go'ya geri gönderiyoruz
-            "end": end,     # Go'ya geri gönderiyoruz
+            "start": start,
+            "end": end,
             "status": "success"
         }
 
@@ -229,6 +202,28 @@ def analyze():
         logging.error(f"API Hatası: {e}")
         return jsonify({"error": str(e)}), 500
 
+@app.route('/train_recognition_model', methods=['POST'])
+def train_recognition_model():
+    try:
+        data = request.json
+        files = data.get('files', []) # List of {path, name}
+        if not files:
+            return jsonify({"error": "No files provided"}), 400
+
+        logging.info(f"Starting training with {len(files)} files...")
+
+        success, message = speaker_recognition.train(files)
+
+        if success:
+             logging.info("Training completed successfully.")
+             return jsonify({"status": "success", "message": message})
+        else:
+             logging.error(f"Training failed: {message}")
+             return jsonify({"status": "error", "message": message}), 500
+
+    except Exception as e:
+        logging.error(f"Training API Error: {e}")
+        return jsonify({"error": str(e)}), 500
+
 if __name__ == '__main__':
-    # Go main.go dosyasındaki 'AnalyzeServiceURL' http://localhost:5001/ olduğu için:
     app.run(host='0.0.0.0', port=5001, debug=True)

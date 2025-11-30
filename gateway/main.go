@@ -10,7 +10,7 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"os" // Dosya işlemleri için eklendi
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -31,7 +31,7 @@ const (
 	AnalyzeServiceURL = "http://localhost:5001/"
 	BytesPerSecond    = SampleRate * (BitDepth / 8) * Channels
 	DBName            = "db.sqlite"
-	RecordDir         = "record_matches" // Kayıt klasörü
+	RecordDir         = "record_matches"
 )
 
 // ... Structlar ...
@@ -109,7 +109,6 @@ var db *sql.DB
 // --- VERİTABANI VE DOSYA SİSTEMİ İŞLEMLERİ ---
 
 func initDB() {
-	// 1. Klasör Kontrolü / Oluşturma
 	if _, err := os.Stat(RecordDir); os.IsNotExist(err) {
 		log.Printf("Klasör oluşturuluyor: %s", RecordDir)
 		if err := os.MkdirAll(RecordDir, 0755); err != nil {
@@ -117,7 +116,6 @@ func initDB() {
 		}
 	}
 
-	// 2. DB Bağlantısı
 	var err error
 	db, err = sql.Open("sqlite3", DBName)
 	if err != nil {
@@ -145,7 +143,6 @@ func initDB() {
        FOREIGN KEY(record_id) REFERENCES records(id)
     );`
 
-	// DEĞİŞİKLİK: voice_sample (BLOB) yerine voice_path (TEXT) yaptık
 	createUsersTable := `
     CREATE TABLE IF NOT EXISTS users (
        id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -272,6 +269,108 @@ func getSegmentsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(segments)
+}
+
+func triggerTraining() {
+	rows, err := db.Query("SELECT name, voice_path FROM users")
+	if err != nil {
+		log.Printf("Training trigger: DB error: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	var files []struct {
+		Path string `json:"path"`
+		Name string `json:"name"`
+	}
+
+	for rows.Next() {
+		var name, path string
+		if err := rows.Scan(&name, &path); err != nil {
+			continue
+		}
+		files = append(files, struct {
+			Path string `json:"path"`
+			Name string `json:"name"`
+		}{Path: path, Name: name})
+	}
+
+	payload := map[string]interface{}{
+		"files": files,
+	}
+	jsonData, _ := json.Marshal(payload)
+
+	resp, err := httpClient.Post(AnalyzeServiceURL+"train_recognition_model", "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		log.Printf("Training trigger: Request error: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		log.Printf("Training trigger: Python service error (%d): %s", resp.StatusCode, string(body))
+	} else {
+		log.Println("Training trigger: Request sent successfully.")
+	}
+}
+
+func handleUserRecord(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method == "OPTIONS" {
+		return
+	}
+
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var payload CreateUserPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	fileBytes, err := base64.StdEncoding.DecodeString(payload.AudioBase64)
+	if err != nil {
+		http.Error(w, "Base64 decode error", http.StatusBadRequest)
+		return
+	}
+
+	filename := fmt.Sprintf("user_%d_%s.wav", time.Now().Unix(), payload.Name)
+	filePath := filepath.Join(RecordDir, filename)
+
+	if err := os.WriteFile(filePath, fileBytes, 0644); err != nil {
+		log.Printf("File write error: %v", err)
+		http.Error(w, "File save error", http.StatusInternalServerError)
+		return
+	}
+
+	stmt, err := db.Prepare("INSERT INTO users(name, surname, voice_path, created_at) values(?, ?, ?, ?)")
+	if err != nil {
+		log.Printf("DB Prepare error: %v", err)
+		http.Error(w, "DB error", http.StatusInternalServerError)
+		return
+	}
+	defer stmt.Close()
+
+	_, err = stmt.Exec(payload.Name, payload.Surname, filePath, time.Now().Format("2006-01-02 15:04:05"))
+	if err != nil {
+		log.Printf("DB Exec error: %v", err)
+		http.Error(w, "DB error", http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("User created: %s. Triggering training...", payload.Name)
+
+	go triggerTraining()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "success", "message": "User created and training started"})
 }
 
 // ... Yardımcı Fonksiyonlar ...
@@ -431,63 +530,7 @@ func handleJSONMessage(msg []byte, wsConn *ThreadSafeConn) {
 	}
 
 	switch req.Type {
-	case "create_user":
-		// 1. Veriyi struct'a al
-		var payload CreateUserPayload
-		if err := json.Unmarshal(req.Data, &payload); err != nil {
-			log.Printf("CreateUser payload hatası: %v", err)
-			wsConn.WriteJSON(WSResponse{Type: "error", Payload: "Geçersiz veri formatı"})
-			return
-		}
-
-		// 2. Base64 verisini çöz (Frontend'den gelen dosya verisi)
-		fileBytes, err := base64.StdEncoding.DecodeString(payload.AudioBase64)
-		if err != nil {
-			log.Printf("Base64 decode hatası: %v", err)
-			wsConn.WriteJSON(WSResponse{Type: "error", Payload: "Ses dosyası çözülemedi"})
-			return
-		}
-
-		// 3. Dosyayı Diske Kaydet
-		// Not: Tarayıcılar genelde WebM formatında kayıt yapar.
-		// Bu yüzden uzantıyı .webm veriyoruz. (WAV header'ı EKLEMİYORUZ çünkü dosya zaten formatlı geliyor)
-		// Frontend artık gerçek WAV gönderiyor, uzantıyı .wav yapıyoruz.
-		filename := fmt.Sprintf("user_%d_%s.wav", time.Now().Unix(), payload.Name)
-		filePath := filepath.Join(RecordDir, filename)
-
-		// Direkt byte'ları yazıyoruz (Header ekleme yok!)
-		if err := os.WriteFile(filePath, fileBytes, 0644); err != nil {
-			log.Printf("Dosya yazma hatası: %v", err)
-			wsConn.WriteJSON(WSResponse{Type: "error", Payload: "Dosya kaydedilemedi"})
-			return
-		}
-
-		// 4. Veritabanına dosya yolunu kaydet
-		stmt, err := db.Prepare("INSERT INTO users(name, surname, voice_path, created_at) values(?, ?, ?, ?)")
-		if err != nil {
-			log.Printf("DB Prepare hatası: %v", err)
-			return
-		}
-		defer stmt.Close()
-
-		res, err := stmt.Exec(payload.Name, payload.Surname, filePath, time.Now().Format("2006-01-02 15:04:05"))
-		if err != nil {
-			log.Printf("DB Kayıt hatası: %v", err)
-			wsConn.WriteJSON(WSResponse{Type: "error", Payload: "Veritabanı hatası"})
-			return
-		}
-
-		lastID, _ := res.LastInsertId()
-		log.Printf("Kullanıcı oluşturuldu: %s (Dosya: %s)", payload.Name, filePath)
-
-		// Başarılı mesajı gönder
-		wsConn.WriteJSON(WSResponse{
-			Type:    "notification",
-			Payload: fmt.Sprintf("Kullanıcı ve ses kaydı başarıyla oluşturuldu. (ID: %d)", lastID),
-		})
-
 	case "get_users":
-		// ... (Burada değişiklik yok, önceki kodun aynısı) ...
 		rows, err := db.Query("SELECT id, name, surname, created_at FROM users ORDER BY created_at DESC")
 		if err != nil {
 			log.Printf("Liste hatası: %v", err)
@@ -605,8 +648,9 @@ func main() {
 	http.HandleFunc("/ws", wsHandler)
 	http.HandleFunc("/api/records", getRecordsHandler)
 	http.HandleFunc("/api/segments", getSegmentsHandler)
+	http.HandleFunc("/api/user_record", handleUserRecord)
 
 	log.Println("Gateway başlatıldı (8080)...")
-	log.Println("API Endpoints: /api/records, /api/segments")
+	log.Println("API Endpoints: /api/records, /api/segments, /api/user_record")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }

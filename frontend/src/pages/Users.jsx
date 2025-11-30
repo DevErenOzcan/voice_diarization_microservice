@@ -7,6 +7,7 @@ const Users = () => {
     const [users, setUsers] = useState([]);
     const [showModal, setShowModal] = useState(false);
     const [formData, setFormData] = useState({ name: '', surname: '' });
+    const [isLoading, setIsLoading] = useState(false);
 
     const [isRecording, setIsRecording] = useState(false);
     const [audioBlob, setAudioBlob] = useState(null);
@@ -97,11 +98,9 @@ const Users = () => {
                 if (msg.type === 'users_list') {
                     setUsers(msg.payload);
                 } else if (msg.type === 'notification') {
+                    // notification is now handled via HTTP response for create,
+                    // but we keep this if server sends other notifications
                     alert(msg.payload);
-                    setShowModal(false);
-                    setFormData({ name: '', surname: '' });
-                    setAudioBlob(null);
-                    sendMessage(JSON.stringify({ type: 'get_users' }));
                 } else if (msg.type === 'error') {
                     alert("Hata: " + msg.payload);
                 }
@@ -169,20 +168,42 @@ const Users = () => {
         if (!formData.name || !formData.surname) return alert("İsim/Soyisim giriniz.");
         if (!audioBlob) return alert("Ses kaydı yapınız.");
 
+        setIsLoading(true);
+
         try {
             const audioBase64 = await blobToBase64(audioBlob);
             const payload = {
-                type: 'create_user',
-                data: {
-                    name: formData.name,
-                    surname: formData.surname,
-                    audio_base64: audioBase64
-                }
+                name: formData.name,
+                surname: formData.surname,
+                audio_base64: audioBase64
             };
-            sendMessage(JSON.stringify(payload));
+
+            // Use fetch instead of WS
+            const response = await fetch('http://localhost:8080/api/user_record', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(payload)
+            });
+
+            if (response.ok) {
+                 alert("Kullanıcı kaydedildi ve model eğitimi başlatıldı. Bu işlem biraz zaman alabilir.");
+                 setShowModal(false);
+                 setFormData({ name: '', surname: '' });
+                 setAudioBlob(null);
+                 if (sendMessage) {
+                     sendMessage(JSON.stringify({ type: 'get_users' }));
+                 }
+            } else {
+                 const errText = await response.text();
+                 alert("Hata: " + errText);
+            }
         } catch (error) {
             console.error("Hata:", error);
-            alert("Dosya hazırlanamadı.");
+            alert("Sunucuya bağlanılamadı.");
+        } finally {
+            setIsLoading(false);
         }
     };
 
@@ -241,8 +262,8 @@ const Users = () => {
 
                             <div className="flex gap-2 mt-4 pt-4 border-t">
                                 <button onClick={() => setShowModal(false)} className="flex-1 border py-2 rounded">İptal</button>
-                                <button onClick={handleSaveUser} disabled={!audioBlob || isRecording} className={`flex-1 text-white py-2 rounded flex justify-center gap-2 ${(!audioBlob || isRecording) ? 'bg-gray-400' : 'bg-indigo-600'}`}>
-                                    <Save size={18}/> Kaydet
+                                <button onClick={handleSaveUser} disabled={!audioBlob || isRecording || isLoading} className={`flex-1 text-white py-2 rounded flex justify-center gap-2 ${(!audioBlob || isRecording || isLoading) ? 'bg-gray-400' : 'bg-indigo-600'}`}>
+                                    <Save size={18}/> {isLoading ? 'Kaydediliyor...' : 'Kaydet'}
                                 </button>
                             </div>
                         </div>
