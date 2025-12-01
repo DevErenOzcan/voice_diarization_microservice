@@ -11,6 +11,7 @@ from flask import Flask, request, jsonify
 from joblib import load
 from sklearn.metrics.pairwise import cosine_similarity
 from textblob import TextBlob
+from deep_translator import GoogleTranslator
 
 # --- EKLENEN KISIM: Joblib için gerekli sınıflar ---
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -255,7 +256,14 @@ def process_text_sentiment(text):
     if not text:
         return "Neutral"
     try:
-        analysis = TextBlob(text)
+        # Translate to English first for better sentiment analysis
+        try:
+            translated_text = GoogleTranslator(source='auto', target='en').translate(text)
+        except Exception as trans_e:
+            logging.warning(f"Translation failed: {trans_e}")
+            translated_text = text
+
+        analysis = TextBlob(translated_text)
         polarity = analysis.sentiment.polarity
         if polarity > 0.1:
             return "Positive"
