@@ -1,0 +1,11 @@
+Flask
+tensorflow
+scikit-learn
+librosa
+pandas
+numpy
+joblib
+textblob
+nltk
+requests
+scipy

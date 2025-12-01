@@ -10,12 +10,23 @@ import tensorflow as tf
 from flask import Flask, request, jsonify
 from joblib import load
 from sklearn.metrics.pairwise import cosine_similarity
+from textblob import TextBlob
 
 # --- EKLENEN KISIM: Joblib için gerekli sınıflar ---
 from sklearn.base import BaseEstimator, TransformerMixin
 
 # Loglama ayarları
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Ensure NLTK data is downloaded
+try:
+    import nltk
+    nltk.download('punkt_tab', quiet=True)
+    nltk.download('averaged_perceptron_tagger_eng', quiet=True)
+    nltk.download('brown', quiet=True)
+    nltk.download('wordnet', quiet=True)
+except Exception as e:
+    logging.warning(f"NLTK data download failed: {e}")
 
 app = Flask(__name__)
 
@@ -240,6 +251,22 @@ def process_sentiment(raw_features):
         logging.error(f"Sentiment process error: {e}")
         return "Error"
 
+def process_text_sentiment(text):
+    if not text:
+        return "Neutral"
+    try:
+        analysis = TextBlob(text)
+        polarity = analysis.sentiment.polarity
+        if polarity > 0.1:
+            return "Positive"
+        elif polarity < -0.1:
+            return "Negative"
+        else:
+            return "Neutral"
+    except Exception as e:
+        logging.error(f"Text sentiment error: {e}")
+        return "Error"
+
 def process_recognition_vector(raw_features):
     """
     Recognition için ham özellikleri Recognition klasöründeki scaler/selector ile işler.
@@ -355,7 +382,10 @@ def analyze():
         # 2. Duygu Analizi
         voice_sentiment = process_sentiment(raw_features)
 
-        # 3. Konuşmacı Tanıma (Embedding çıkarma + Similarity)
+        # 3. Metin Duygu Analizi
+        text_sentiment = process_text_sentiment(data.get('text', ''))
+
+        # 4. Konuşmacı Tanıma (Embedding çıkarma + Similarity)
         rec_vector = process_recognition_vector(raw_features)
 
         # Artık fonksiyon iki değer dönüyor: ID ve Skor
@@ -365,6 +395,7 @@ def analyze():
             "segment_id": data.get('segment_id'),
             "text": data.get('text', ''),
             "voice_sentiment": voice_sentiment,
+            "text_sentiment": text_sentiment,
             "speaker": speaker_id,
             "similarity_score": speaker_score, # Yeni eklenen alan
             "language": data.get('language', ''),
