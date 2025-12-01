@@ -9,3 +9,4 @@ textblob
 nltk
 requests
 scipy
+deep-translator
