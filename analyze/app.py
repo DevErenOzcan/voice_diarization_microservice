@@ -6,10 +6,12 @@ import numpy as np
 import pandas as pd
 import librosa
 import tensorflow as tf
-import csv   # EKLENDİ
-import time  # EKLENDİ
+import csv
+import time
+import threading
 from flask import Flask, request, jsonify
 from joblib import load
+from speaker_training import train_speaker_model
 
 # Loglama ayarları
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -20,6 +22,8 @@ app = Flask(__name__)
 class MLModels:
     def __init__(self):
         logging.info("Modeller yükleniyor...")
+        self.speaker_model = None
+
         try:
             # GPU kullanımını kapat
             tf.config.set_visible_devices([], 'GPU')
@@ -54,10 +58,30 @@ class MLModels:
             self.selector = load(selector_path)
             self.label_encoder = load(label_encoder_path)
             self.best_model = tf.keras.models.load_model(best_model_path)
-            logging.info("Tüm modeller başarıyla yüklendi.")
+            logging.info("Sentiment modelleri başarıyla yüklendi.")
+
+            # Load Speaker Models
+            self.load_speaker_models()
+
         except Exception as e:
             logging.error(f"Model yükleme hatası: {e}")
             raise e
+
+    def load_speaker_models(self):
+        try:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            speaker_model_dir = os.path.join(base_dir, 'models', 'current')
+            tpot_path = os.path.join(speaker_model_dir, 'tpot_best.pkl')
+
+            if os.path.exists(tpot_path):
+                self.speaker_model = load(tpot_path)
+                logging.info("Speaker identification model loaded.")
+            else:
+                logging.warning("Speaker identification model not found at startup.")
+                self.speaker_model = None
+        except Exception as e:
+            logging.error(f"Error loading speaker model: {e}")
+            self.speaker_model = None
 
 # Modelleri başlat
 models = MLModels()
@@ -140,6 +164,30 @@ def predict_sentiment(df_features):
         logging.error(f"Tahminleme hatası: {e}")
         return "Error"
 
+def predict_speaker(features_array):
+    if models.speaker_model is None:
+        return None
+    try:
+        # features_array is shape (N_features,)
+        # Reshape to (1, N_features)
+        X = features_array.reshape(1, -1)
+        # Predict
+        prediction = models.speaker_model.predict(X)[0]
+        # prediction is likely string (Actor_ID/User_ID)
+        return str(prediction)
+    except Exception as e:
+        logging.error(f"Speaker prediction error: {e}")
+        return None
+
+def run_training_background():
+    logging.info("Background training triggered.")
+    try:
+        train_speaker_model()
+        models.load_speaker_models()
+        logging.info("Background training finished and models reloaded.")
+    except Exception as e:
+        logging.error(f"Background training failed: {e}")
+
 # --- Endpoints ---
 
 @app.route('/', methods=['POST'])
@@ -169,12 +217,16 @@ def analyze():
         df = pd.DataFrame([features], columns=columns)
         audio_sentiment = predict_sentiment(df)
 
-        logging.info(f"Segment: {segment_id} | Tahmin: {audio_sentiment} | Start: {start}")
+        # Speaker Identification
+        speaker_id = predict_speaker(features)
+
+        logging.info(f"Segment: {segment_id} | Tahmin: {audio_sentiment} | Speaker: {speaker_id} | Start: {start}")
 
         response = {
             "segment_id": segment_id,
             "text": text,
             "voice_sentiment": audio_sentiment,
+            "speaker": speaker_id,
             "language": language,
             "start": start,
             "end": end,
@@ -227,7 +279,7 @@ def identificate_user():
             return jsonify({"error": "Dosya diske yazılamadı"}), 500
 
         # 4. CSV Dosyasına Ekleme
-        csv_file_path = os.path.join('analyze/records.csv')
+        csv_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'records.csv')
         file_exists = os.path.isfile(csv_file_path)
 
         try:
@@ -244,11 +296,12 @@ def identificate_user():
 
         except Exception as csv_err:
             logging.error(f"CSV yazma hatası: {csv_err}")
-            # Ses dosyası kaydedildi ama CSV yazılamadıysa, hata dönmek yerine warning basabiliriz
-            # veya işlemi başarısız sayabiliriz. Şimdilik hata dönüyoruz.
             return jsonify({"error": "CSV kaydı yapılamadı"}), 500
 
-        return jsonify({"status": "success", "file_path": file_path})
+        # 5. Trigger Training (Background)
+        threading.Thread(target=run_training_background).start()
+
+        return jsonify({"status": "success", "file_path": file_path, "message": "Training started"})
 
     except Exception as e:
         logging.error(f"Identificate API Hatası: {e}")
