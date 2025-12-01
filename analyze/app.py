@@ -19,11 +19,11 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 app = Flask(__name__)
 
-# --- SABİTLER ---
-SPEAKER_DB_FILE = 'analyze/speakers_db.json'  # Vektörlerin tutulacağı dosya
-
 # Dizin Ayarları
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+SPEAKER_DB_FILE = os.path.join(BASE_DIR, 'speakers_db.json')
+
 # Klasör yollarını projenize göre kontrol edin, varsayılan yapı:
 SENTIMENT_MODEL_DIR = os.path.join(BASE_DIR, 'models', 'sentiment')
 RECOGNITION_MODEL_DIR = os.path.join(BASE_DIR, 'models', 'recognition')
@@ -68,7 +68,7 @@ class MLModels:
         # 2. Recognition Pre-processorlarını Yükle
         self.load_recognition_models()
 
-        # 3. Hoparlör Veritabanını Yükle (JSON)
+        # 3. speaker Veritabanını Yükle (JSON)
         self.speaker_vectors = {}
         self.load_speaker_db()
 
@@ -271,7 +271,7 @@ def process_recognition_vector(raw_features):
         # Hata durumunda en azından raw features dön
         return raw_features
 
-def identify_speaker_logic(processed_vector, threshold=0.90):
+def identify_speaker_logic(processed_vector, threshold=0.70):
     """İşlenmiş vektörü veritabanı ile Cosine Similarity kullanarak kıyaslar."""
     if not models.speaker_vectors:
         return None

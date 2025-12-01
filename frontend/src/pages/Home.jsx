@@ -93,8 +93,10 @@ const Home = () => {
     };
 
     const stopLiveAnalysis = () => {
-        if (socketRef.current) {
-            socketRef.current.close();
+        if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+            socketRef.current.send("STOP");
+            setIsRecording(false);
+            stopAudioProcessing();
         }
     };
 

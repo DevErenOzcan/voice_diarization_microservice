@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"sync"
+	"sync" // WaitGroup için gerekli
 	"time"
 
 	"gateway/database"
@@ -25,6 +25,7 @@ func HandleLiveAudio(w http.ResponseWriter, r *http.Request) {
 		log.Println("WS Upgrade Error:", err)
 		return
 	}
+	// Bağlantıyı fonksiyon sonunda kapat, ancak önce WaitGroup'u bekle
 	defer conn.Close()
 
 	sessionID := fmt.Sprintf("sess_%d", time.Now().Unix())
@@ -46,6 +47,7 @@ func HandleLiveAudio(w http.ResponseWriter, r *http.Request) {
 		isSpeaking     bool
 		silenceCounter int
 		bytesProcessed int
+		wg             sync.WaitGroup // Asenkron işlemler için bekleme grubu
 	)
 
 	connLock := &sync.Mutex{}
@@ -53,8 +55,24 @@ func HandleLiveAudio(w http.ResponseWriter, r *http.Request) {
 	for {
 		msgType, data, err := conn.ReadMessage()
 		if err != nil {
-			log.Println("Bağlantı kesildi:", sessionID)
+			log.Println("Bağlantı kesildi veya hata:", err)
 			break
+		}
+
+		// 1. "STOP" mesajı kontrolü (Frontend durdur butonuna bastığında)
+		if msgType == websocket.TextMessage && string(data) == "STOP" {
+			log.Println("Durdurma isteği alındı, tampon temizleniyor...")
+
+			// Eğer elde işlenmemiş segment varsa, onu zorla işle
+			if len(currentSegment) > 0 {
+				segmentCopy := make([]byte, len(currentSegment))
+				copy(segmentCopy, currentSegment)
+				offsetSec := float64(bytesProcessed-len(currentSegment)) / float64(models.SampleRate*2)
+
+				wg.Add(1) // Bekleme grubuna ekle
+				go processAndRespond(sessionID, segmentCopy, offsetSec, conn, connLock, &wg)
+			}
+			break // Döngüden çık, aşağıdaki wg.Wait() çalışsın
 		}
 
 		if msgType != websocket.BinaryMessage {
@@ -91,7 +109,8 @@ func HandleLiveAudio(w http.ResponseWriter, r *http.Request) {
 				offsetSec := float64(frameStart-len(currentSegment)) / float64(models.SampleRate*2)
 
 				// Go Routine içinde servislere gönder
-				go processAndRespond(sessionID, segmentCopy, offsetSec, conn, connLock)
+				wg.Add(1) // Bekleme grubuna ekle
+				go processAndRespond(sessionID, segmentCopy, offsetSec, conn, connLock, &wg)
 
 				currentSegment = nil
 				isSpeaking = false
@@ -99,10 +118,16 @@ func HandleLiveAudio(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+
+	// Döngü bittiğinde (STOP geldiğinde), tüm asenkron işlemlerin bitmesini bekle
+	wg.Wait()
+	log.Println("Analiz oturumu sonlandırıldı:", sessionID)
 }
 
-// Yardımcı fonksiyon: Servisleri çağırır ve sonucu WS'den döner
-func processAndRespond(recordID string, pcmData []byte, offset float64, conn *websocket.Conn, mu *sync.Mutex) {
+// processAndRespond imzasını wg *sync.WaitGroup alacak şekilde güncelledik
+func processAndRespond(recordID string, pcmData []byte, offset float64, conn *websocket.Conn, mu *sync.Mutex, wg *sync.WaitGroup) {
+	defer wg.Done() // İşlem bitince WaitGroup'tan düş
+
 	whisperResp, err := services.CallWhisperService(pcmData)
 	if err != nil {
 		log.Println("Whisper Error:", err)
@@ -152,7 +177,10 @@ func processAndRespond(recordID string, pcmData []byte, offset float64, conn *we
 		}
 
 		mu.Lock()
-		conn.WriteJSON(response)
+		// Bağlantı kapanmadan yazmaya çalış
+		if err := conn.WriteJSON(response); err != nil {
+			log.Println("WS Write Error (muhtemelen bağlantı kapandı):", err)
+		}
 		mu.Unlock()
 	}
 }
