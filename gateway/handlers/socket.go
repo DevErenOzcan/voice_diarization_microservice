@@ -124,7 +124,7 @@ func HandleLiveAudio(w http.ResponseWriter, r *http.Request) {
 	log.Println("Analiz oturumu sonlandırıldı:", sessionID)
 }
 
-// processAndRespond imzasını wg *sync.WaitGroup alacak şekilde güncelledik
+// processAndRespond güncellendi: ID -> İsim Soyisim dönüşümü eklendi
 func processAndRespond(recordID string, pcmData []byte, offset float64, conn *websocket.Conn, mu *sync.Mutex, wg *sync.WaitGroup) {
 	defer wg.Done() // İşlem bitince WaitGroup'tan düş
 
@@ -149,30 +149,48 @@ func processAndRespond(recordID string, pcmData []byte, offset float64, conn *we
 			continue
 		}
 
+		// --- DEĞİŞİKLİK BURADA BAŞLIYOR ---
+		// Gelen speaker ID'si (örn: "1" veya "Unknown") üzerinden ismi bul
+		displaySpeaker := analyzeResp.Speaker // Varsayılan olarak ID kalsın
+
+		if analyzeResp.Speaker != "Unknown" && analyzeResp.Speaker != "" {
+			var user models.User
+			// Veritabanında ID'ye göre kullanıcıyı ara
+			// analyzeResp.Speaker string olduğu için, veritabanı sorgusunda ID ile eşleşmesi gerekir.
+			if result := database.DB.First(&user, "id = ?", analyzeResp.Speaker); result.Error == nil {
+				// Kullanıcı bulunduysa format: "Ad Soyad"
+				displaySpeaker = fmt.Sprintf("%s %s", user.Name, user.Surname)
+			}
+		}
+		// --- DEĞİŞİKLİK BURADA BİTİYOR ---
+
 		finalStart := offset + seg.Start
 		finalEnd := offset + seg.End
 
-		// Veritabanına segmenti kaydet (GORM)
+		// Veritabanına segmenti kaydet
+		// Speaker alanına artık Ad Soyad yazıyoruz
 		newSegment := models.Segment{
-			RecordID:       recordID,
-			StartOffset:    finalStart,
-			EndOffset:      finalEnd,
-			Text:           analyzeResp.Text,
-			TextSentiment:  analyzeResp.TextSentiment,
-			VoiceSentiment: analyzeResp.VoiceSentiment,
-			Speaker:        analyzeResp.Speaker,
+			RecordID:        recordID,
+			StartOffset:     finalStart,
+			EndOffset:       finalEnd,
+			Text:            analyzeResp.Text,
+			TextSentiment:   analyzeResp.TextSentiment,
+			VoiceSentiment:  analyzeResp.VoiceSentiment,
+			Speaker:         displaySpeaker, // ID yerine isim
+			SimilarityScore: analyzeResp.SimilarityScore,
 		}
 		database.DB.Create(&newSegment)
 
 		response := map[string]interface{}{
 			"type": "live_analysis",
 			"payload": models.LiveAnalysisResult{
-				Start:          finalStart,
-				End:            finalEnd,
-				Text:           analyzeResp.Text,
-				TextSentiment:  analyzeResp.TextSentiment,
-				VoiceSentiment: analyzeResp.VoiceSentiment,
-				Speaker:        analyzeResp.Speaker,
+				Start:           finalStart,
+				End:             finalEnd,
+				Text:            analyzeResp.Text,
+				TextSentiment:   analyzeResp.TextSentiment,
+				VoiceSentiment:  analyzeResp.VoiceSentiment,
+				Speaker:         displaySpeaker, // ID yerine isim frontend'e gidiyor
+				SimilarityScore: analyzeResp.SimilarityScore,
 			},
 		}
 

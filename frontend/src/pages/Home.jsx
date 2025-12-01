@@ -47,6 +47,7 @@ const Home = () => {
                 try {
                     const data = JSON.parse(event.data);
                     if (data.type === 'live_analysis') {
+                        // Gelen payload içinde similarity_score da var
                         setSegments(prev => [...prev, data.payload]);
                     }
                 } catch (e) {
@@ -157,7 +158,8 @@ const Home = () => {
                         <thead className="bg-gray-50 sticky top-0 z-10 shadow-sm">
                         <tr>
                             <th className="px-6 py-3 text-left text-xs font-bold text-gray-500 uppercase w-24">Süre</th>
-                            <th className="px-6 py-3 text-left text-xs font-bold text-gray-500 uppercase w-32">Konuşmacı</th>
+                            {/* Başlık güncellendi */}
+                            <th className="px-6 py-3 text-left text-xs font-bold text-gray-500 uppercase w-40">Konuşmacı / Skor</th>
                             <th className="px-6 py-3 text-left text-xs font-bold text-gray-500 uppercase">Metin</th>
                             <th className="px-6 py-3 text-left text-xs font-bold text-gray-500 uppercase w-32">Duygu</th>
                         </tr>
@@ -169,7 +171,19 @@ const Home = () => {
                             segments.map((seg, index) => (
                                 <tr key={index} className="hover:bg-indigo-50">
                                     <td className="px-6 py-4 text-sm text-gray-500 font-mono">{formatTime(seg.start)}</td>
-                                    <td className="px-6 py-4"><span className="bg-blue-100 text-blue-800 text-xs px-2 py-1 rounded-full">{seg.speaker}</span></td>
+                                    <td className="px-6 py-4">
+                                        <div className="flex items-center gap-2">
+                                            <span className="bg-blue-100 text-blue-800 text-xs px-2 py-1 rounded-full font-bold">
+                                                {seg.speaker}
+                                            </span>
+                                            {/* Skor gösterimi eklendi: Örn: %85 */}
+                                            {seg.similarity_score !== undefined && (
+                                                <span className="text-xs text-gray-500 font-mono">
+                                                   %{(seg.similarity_score * 100).toFixed(0)}
+                                                </span>
+                                            )}
+                                        </div>
+                                    </td>
                                     <td className="px-6 py-4 text-sm text-gray-900">{seg.text}</td>
                                     <td className="px-6 py-4 text-sm">{seg.textSentiment}</td>
                                 </tr>

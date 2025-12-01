@@ -271,27 +271,27 @@ def process_recognition_vector(raw_features):
         # Hata durumunda en azından raw features dön
         return raw_features
 
-def identify_speaker_logic(processed_vector, threshold=0.70):
-    """İşlenmiş vektörü veritabanı ile Cosine Similarity kullanarak kıyaslar."""
+def identify_speaker_logic(processed_vector):
+    """
+    Threshold kontrolü OLMADAN en benzer kullanıcıyı ve skorunu döner.
+    Dönüş formatı: (best_user_id, similarity_score)
+    """
     if not models.speaker_vectors:
-        return None
+        return None, 0.0
 
-    best_user = None
-    best_score = -1.0
+    best_user = "Unknown"
+    best_score = -1.0 # Başlangıç değeri
 
-    # processed_vector tek boyutlu gelirse (N,), (1, N) yap
     input_vec = processed_vector.reshape(1, -1)
 
     for user_id, vectors_list in models.speaker_vectors.items():
         db_vectors = np.array(vectors_list)
-        # db_vectors: (M_samples, N_features)
 
+        # Boyut kontrolü
         if db_vectors.shape[1] != input_vec.shape[1]:
-            # Boyut uyuşmazlığı varsa (örn. model değiştiyse) atla
             continue
 
         similarities = cosine_similarity(input_vec, db_vectors)
-        # Kullanıcının kayıtlı tüm seslerine olan benzerliklerin en büyüğünü al
         max_sim = np.max(similarities)
 
         if max_sim > best_score:
@@ -300,10 +300,8 @@ def identify_speaker_logic(processed_vector, threshold=0.70):
 
     logging.info(f"En yakın: {best_user} | Skor: {best_score:.4f}")
 
-    if best_score >= threshold:
-        return best_user
-    else:
-        return "Unknown"
+    # JSON serileştirme hatası olmaması için float'a çeviriyoruz
+    return best_user, float(best_score)
 
 # --- API ENDPOINTS ---
 
@@ -359,13 +357,16 @@ def analyze():
 
         # 3. Konuşmacı Tanıma (Embedding çıkarma + Similarity)
         rec_vector = process_recognition_vector(raw_features)
-        speaker_id = identify_speaker_logic(rec_vector, threshold=0.90)
+
+        # Artık fonksiyon iki değer dönüyor: ID ve Skor
+        speaker_id, speaker_score = identify_speaker_logic(rec_vector)
 
         response = {
             "segment_id": data.get('segment_id'),
             "text": data.get('text', ''),
             "voice_sentiment": voice_sentiment,
             "speaker": speaker_id,
+            "similarity_score": speaker_score, # Yeni eklenen alan
             "language": data.get('language', ''),
             "start": data.get('start', 0.0),
             "end": data.get('end', 0.0),

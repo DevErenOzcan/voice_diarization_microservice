@@ -36,38 +36,41 @@ type Record struct {
 }
 
 type Segment struct {
-	ID             uint    `gorm:"primaryKey" json:"-"`
-	RecordID       string  `gorm:"index" json:"record_id"`
-	StartOffset    float64 `json:"start"`
-	EndOffset      float64 `json:"end"`
-	Text           string  `json:"text"`
-	TextSentiment  string  `json:"textSentiment"`
-	VoiceSentiment string  `json:"voiceSentiment"`
-	Speaker        string  `json:"speaker"`
+	ID              uint    `gorm:"primaryKey" json:"-"`
+	RecordID        string  `gorm:"index" json:"record_id"`
+	StartOffset     float64 `json:"start"`
+	EndOffset       float64 `json:"end"`
+	Text            string  `json:"text"`
+	TextSentiment   string  `json:"textSentiment"`
+	VoiceSentiment  string  `json:"voiceSentiment"`
+	Speaker         string  `json:"speaker"`
+	SimilarityScore float64 `json:"similarity_score"` // YENİ: Veritabanına kaydetmek için eklendi
 }
 
 // --- DTO (Data Transfer Objects) ---
 
 // Frontend'e giden canlı analiz verisi
 type LiveAnalysisResult struct {
-	Start          float64 `json:"start"`
-	End            float64 `json:"end"`
-	Text           string  `json:"text"`
-	TextSentiment  string  `json:"textSentiment"`
-	VoiceSentiment string  `json:"voiceSentiment"`
-	Speaker        string  `json:"speaker"`
+	Start           float64 `json:"start"`
+	End             float64 `json:"end"`
+	Text            string  `json:"text"`
+	TextSentiment   string  `json:"textSentiment"`
+	VoiceSentiment  string  `json:"voiceSentiment"`
+	Speaker         string  `json:"speaker"`
+	SimilarityScore float64 `json:"similarity_score"` // YENİ: Frontend'e göndermek için eklendi
 }
 
 // Servisler arası iletişim payload'ı
 type ServicePayload struct {
-	RecordID       string           `json:"record_id,omitempty"`
-	WavFile        []byte           `json:"wav_file,omitempty"`
-	Text           string           `json:"text"`
-	Start          float64          `json:"start"`
-	End            float64          `json:"end"`
-	Language       string           `json:"language"`
-	TextSentiment  string           `json:"text_sentiment,omitempty"`
-	VoiceSentiment string           `json:"voice_sentiment,omitempty"`
-	Speaker        string           `json:"speaker,omitempty"`
-	Segments       []ServicePayload `json:"segments,omitempty"`
+	RecordID        string           `json:"record_id,omitempty"`
+	WavFile         []byte           `json:"wav_file,omitempty"`
+	Text            string           `json:"text"`
+	Start           float64          `json:"start"`
+	End             float64          `json:"end"`
+	Language        string           `json:"language"`
+	TextSentiment   string           `json:"text_sentiment,omitempty"`
+	VoiceSentiment  string           `json:"voice_sentiment,omitempty"`
+	Speaker         string           `json:"speaker,omitempty"`
+	SimilarityScore float64          `json:"similarity_score,omitempty"` // YENİ: Python servisinden gelen yanıtı parse etmek için eklendi
+	Segments        []ServicePayload `json:"segments,omitempty"`
 }
