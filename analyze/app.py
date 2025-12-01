@@ -1,113 +1,155 @@
 import os
 import io
+import json
 import base64
 import logging
 import numpy as np
 import pandas as pd
 import librosa
 import tensorflow as tf
-import csv
-import time
-import threading
 from flask import Flask, request, jsonify
 from joblib import load
-from speaker_training import train_speaker_model
+from sklearn.metrics.pairwise import cosine_similarity
+
+# --- EKLENEN KISIM: Joblib için gerekli sınıflar ---
+from sklearn.base import BaseEstimator, TransformerMixin
 
 # Loglama ayarları
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 app = Flask(__name__)
 
-# --- Modelleri Yükleme ---
+# --- SABİTLER ---
+SPEAKER_DB_FILE = 'analyze/speakers_db.json'  # Vektörlerin tutulacağı dosya
+
+# Dizin Ayarları
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# Klasör yollarını projenize göre kontrol edin, varsayılan yapı:
+SENTIMENT_MODEL_DIR = os.path.join(BASE_DIR, 'models', 'sentiment')
+RECOGNITION_MODEL_DIR = os.path.join(BASE_DIR, 'models', 'recognition')
+
+# --- EKSİK OLAN SINIF (ÖNEMLİ) ---
+# selector.pkl dosyasının yüklenebilmesi için bu sınıfın burada tanımlı olması ŞARTTIR.
+class FeatureSelector(BaseEstimator, TransformerMixin):
+    def __init__(self, feature_indices):
+        # Eğitim sırasında seçilen özelliklerin indekslerini tutar
+        self.feature_indices = feature_indices
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X, y=None):
+        # Gelen veri DataFrame mi yoksa Numpy Array mi kontrol et
+        # Tahmin kodunuzda Scaler array döndürdüğü için burası array çalışmalı.
+        if hasattr(X, 'iloc'):
+            # DataFrame ise
+            return X.iloc[:, self.feature_indices]
+        else:
+            # Numpy Array ise
+            return X[:, self.feature_indices]
+
+# --- Modelleri ve Veritabanını Yöneten Sınıf ---
 class MLModels:
     def __init__(self):
-        logging.info("Modeller yükleniyor...")
-        self.speaker_model = None
+        logging.info("Sistem başlatılıyor...")
 
+        # GPU'yu devre dışı bırak (TensorFlow için opsiyonel)
         try:
-            # GPU kullanımını kapat
             tf.config.set_visible_devices([], 'GPU')
+        except:
+            pass
 
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-            env_model_dir = os.getenv('ANALYZE_MODEL_DIR')
-            if env_model_dir:
-                if not os.path.isabs(env_model_dir):
-                    model_dir = os.path.join(base_dir, env_model_dir)
-                else:
-                    model_dir = env_model_dir
-                logging.info(f"ANALYZE_MODEL_DIR provided, using: {model_dir}")
-            else:
-                model_dir = os.path.join(base_dir, './models/old')
-                logging.info(f"ANALYZE_MODEL_DIR not set, defaulting to: {model_dir}")
+        self.sentiment_ready = False
+        self.recognition_ready = False
 
-            scaler_path = os.path.join(model_dir, 'scaler.pkl')
-            selector_path = os.path.join(model_dir, 'selector.pkl')
-            label_encoder_path = os.path.join(model_dir, 'label_encoder.pkl')
-            best_model_path = os.path.join(model_dir, 'best_model.keras')
+        # 1. Sentiment Modellerini Yükle
+        self.load_sentiment_models()
 
-            logging.info(f"Model dizini: {model_dir}")
+        # 2. Recognition Pre-processorlarını Yükle
+        self.load_recognition_models()
 
-            missing = [p for p in (scaler_path, selector_path, label_encoder_path, best_model_path) if not os.path.exists(p)]
-            if missing:
-                logging.error("Aşağıdaki model dosyaları bulunamadı:")
-                for m in missing:
-                    logging.error(f"  - {m}")
-                raise FileNotFoundError(f"Eksik model dosyaları: {missing}")
+        # 3. Hoparlör Veritabanını Yükle (JSON)
+        self.speaker_vectors = {}
+        self.load_speaker_db()
 
-            self.scaler = load(scaler_path)
-            self.selector = load(selector_path)
-            self.label_encoder = load(label_encoder_path)
-            self.best_model = tf.keras.models.load_model(best_model_path)
-            logging.info("Sentiment modelleri başarıyla yüklendi.")
-
-            # Load Speaker Models
-            self.load_speaker_models()
-
-        except Exception as e:
-            logging.error(f"Model yükleme hatası: {e}")
-            raise e
-
-    def load_speaker_models(self):
+    def load_sentiment_models(self):
+        """Duygu analizi için gerekli scaler, selector ve keras modelini yükler."""
         try:
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-            speaker_model_dir = os.path.join(base_dir, 'models', 'current')
-            tpot_path = os.path.join(speaker_model_dir, 'tpot_best.pkl')
+            logging.info(f"Sentiment modelleri yükleniyor...: {SENTIMENT_MODEL_DIR}")
+            self.sent_scaler = load(os.path.join(SENTIMENT_MODEL_DIR, 'scaler.pkl'))
+            self.sent_selector = load(os.path.join(SENTIMENT_MODEL_DIR, 'selector.pkl'))
+            self.sent_label_encoder = load(os.path.join(SENTIMENT_MODEL_DIR, 'label_encoder.pkl'))
+            self.sent_model = tf.keras.models.load_model(os.path.join(SENTIMENT_MODEL_DIR, 'best_model.keras'))
 
-            if os.path.exists(tpot_path):
-                self.speaker_model = load(tpot_path)
-                logging.info("Speaker identification model loaded.")
-            else:
-                logging.warning("Speaker identification model not found at startup.")
-                self.speaker_model = None
+            self.sentiment_ready = True
+            logging.info("Sentiment modelleri BAŞARIYLA yüklendi.")
         except Exception as e:
-            logging.error(f"Error loading speaker model: {e}")
-            self.speaker_model = None
+            logging.error(f"Sentiment modelleri yüklenirken hata (Opsiyonel): {e}")
+            self.sentiment_ready = False
 
-# Modelleri başlat
+    def load_recognition_models(self):
+        """
+        Recognition (Hoparlör Tanıma) için Scaler ve Selector yükler.
+        """
+        try:
+            logging.info(f"Recognition modelleri yükleniyor...: {RECOGNITION_MODEL_DIR}")
+            # Tahmin kodunuzdaki isimlerle aynı olmalı
+            self.rec_scaler = load(os.path.join(RECOGNITION_MODEL_DIR, 'scaler.pkl'))
+            self.rec_selector = load(os.path.join(RECOGNITION_MODEL_DIR, 'selector.pkl'))
+
+            # Eğer Actor ID tahmini yapacaksanız tpot modelini de yükleyebilirsiniz
+            # self.rec_model = load(os.path.join(RECOGNITION_MODEL_DIR, 'tpot_best.pkl'))
+
+            self.recognition_ready = True
+            logging.info("Recognition pre-processorları BAŞARIYLA yüklendi.")
+        except Exception as e:
+            logging.error(f"Recognition modelleri yüklenirken hata oluştu: {e}")
+            self.recognition_ready = False
+
+    def load_speaker_db(self):
+        if os.path.exists(SPEAKER_DB_FILE):
+            try:
+                with open(SPEAKER_DB_FILE, 'r') as f:
+                    self.speaker_vectors = json.load(f)
+                logging.info(f"Speakers DB yüklendi: {len(self.speaker_vectors)} kullanıcı.")
+            except Exception as e:
+                logging.error(f"DB okuma hatası: {e}")
+                self.speaker_vectors = {}
+        else:
+            self.speaker_vectors = {}
+
+    def save_speaker_db(self):
+        try:
+            os.makedirs(os.path.dirname(SPEAKER_DB_FILE), exist_ok=True)
+            with open(SPEAKER_DB_FILE, 'w') as f:
+                json.dump(self.speaker_vectors, f)
+        except Exception as e:
+            logging.error(f"DB kayıt hatası: {e}")
+
+    def add_speaker_vector(self, user_id, vector):
+        if user_id not in self.speaker_vectors:
+            self.speaker_vectors[user_id] = []
+
+        if isinstance(vector, np.ndarray):
+            vector = vector.tolist()
+
+        self.speaker_vectors[user_id].append(vector)
+        self.save_speaker_db()
+
+# Global Model Nesnesi
 models = MLModels()
 
-# --- Yardımcı Fonksiyonlar ---
-
-def get_column_names():
-    columns = (
-            ['zero_crossing', 'centroid_mean', 'rolloff_mean', 'bandwidth_mean'] +
-            [f'contrast_mean_{i}' for i in range(7)] +
-            [f'contrast_std_{i}' for i in range(7)] +
-            [f'chroma_stft_mean_{i}' for i in range(12)] +
-            [f'chroma_stft_std_{i}' for i in range(12)] +
-            ['rms_mean', 'melspectrogram_mean', 'melspectrogram_std', 'flatness_mean'] +
-            [f'poly_mean_{i}' for i in range(2)] +
-            [f'mfcc_mean_{i}' for i in range(40)] +
-            [f'mfcc_std_{i}' for i in range(40)] +
-            ['energy']
-    )
-    return columns
-
-def extract_features_from_bytes(wav_bytes, sr=16000):
+# --- Özellik Çıkarma (Librosa) ---
+def extract_features_from_bytes(wav_bytes, sr=None):
     try:
         with io.BytesIO(wav_bytes) as wav_buffer:
+            # sr=None, orijinal örnekleme hızını korur
             audio, sample_rate = librosa.load(wav_buffer, sr=sr)
 
+        if len(audio) < 1024:
+            logging.warning("Ses çok kısa, özellik çıkarımı sağlıksız olabilir.")
+
+        # -- Burada tahmin kodunuzdaki extract_features ile AYNI özellikleri çıkarıyoruz --
         zero_crossing = np.mean(librosa.feature.zero_crossing_rate(y=audio).T, axis=0)
         spectral_centroid = np.mean(librosa.feature.spectral_centroid(y=audio, sr=sample_rate).T, axis=0)
         spectral_rolloff = np.mean(librosa.feature.spectral_rolloff(y=audio, sr=sample_rate).T, axis=0)
@@ -148,163 +190,191 @@ def extract_features_from_bytes(wav_bytes, sr=16000):
         return features
 
     except Exception as e:
-        logging.error(f"Öznitelik çıkarma hatası: {e}")
+        logging.error(f"Feature extraction error: {e}")
         raise e
 
-def predict_sentiment(df_features):
+def get_column_names():
+    # Sentiment modeli için DataFrame sütun isimleri gerekebilir
+    return (
+            ['zero_crossing', 'centroid_mean', 'rolloff_mean', 'bandwidth_mean'] +
+            [f'contrast_mean_{i}' for i in range(7)] +
+            [f'contrast_std_{i}' for i in range(7)] +
+            [f'chroma_stft_mean_{i}' for i in range(12)] +
+            [f'chroma_stft_std_{i}' for i in range(12)] +
+            ['rms_mean', 'melspectrogram_mean', 'melspectrogram_std', 'flatness_mean'] +
+            [f'poly_mean_{i}' for i in range(2)] +
+            [f'mfcc_mean_{i}' for i in range(40)] +
+            [f'mfcc_std_{i}' for i in range(40)] +
+            ['energy']
+    )
+
+# --- İŞLEM MANTIĞI ---
+
+def process_sentiment(raw_features):
+    """Sentiment modeli için veriyi hazırlar ve tahmin eder."""
+    if not models.sentiment_ready:
+        return "ModelNotLoaded"
+
     try:
-        new_features = df_features[models.selector].values
-        new_features_scaled = models.scaler.transform(new_features)
-        new_features_scaled = new_features_scaled.reshape(new_features_scaled.shape[0], new_features_scaled.shape[1], 1)
-        predictions = models.best_model.predict(new_features_scaled, verbose=0)
-        predicted_classes = np.argmax(predictions, axis=1)
-        predicted_labels = models.label_encoder.inverse_transform(predicted_classes)
-        return predicted_labels[0]
+        columns = get_column_names()
+        # Sentiment modeli DataFrame ve belli sütun isimleri bekleyebilir
+        if len(raw_features) != len(columns):
+            logging.warning("Feature size mismatch for sentiment.")
+            return "DimMismatch"
+
+        df = pd.DataFrame([raw_features], columns=columns)
+
+        # Sentiment Selector -> Scaler -> Model (Eğitim sırasına göre)
+        X_selected = df[models.sent_selector].values
+        X_scaled = models.sent_scaler.transform(X_selected)
+
+        # CNN/LSTM için reshape (Samples, Time steps, Features)
+        X_reshaped = X_scaled.reshape(X_scaled.shape[0], X_scaled.shape[1], 1)
+
+        preds = models.sent_model.predict(X_reshaped, verbose=0)
+        pred_class = np.argmax(preds, axis=1)
+        label = models.sent_label_encoder.inverse_transform(pred_class)[0]
+
+        return label
     except Exception as e:
-        logging.error(f"Tahminleme hatası: {e}")
+        logging.error(f"Sentiment process error: {e}")
         return "Error"
 
-def predict_speaker(features_array):
-    if models.speaker_model is None:
+def process_recognition_vector(raw_features):
+    """
+    Recognition için ham özellikleri Recognition klasöründeki scaler/selector ile işler.
+    Bu çıktı veritabanına kaydedilir.
+    """
+    if not models.recognition_ready:
+        logging.error("Recognition modelleri yüklü değil.")
+        return raw_features
+
+    try:
+        # Paylaştığınız tahmin kodundaki akış:
+        # X = features.reshape(1, -1)
+        # X_scaled = scaler.transform(X)
+        # X_selected = selector.transform(X_scaled)
+
+        X = raw_features.reshape(1, -1)
+
+        # 1. Scaler
+        X_scaled = models.rec_scaler.transform(X)
+
+        # 2. Selector (Artık yukarıdaki FeatureSelector sınıfı sayesinde çalışacak)
+        X_final = models.rec_selector.transform(X_scaled)
+
+        # Sonuç: (1, N_features) -> Düzleştirip (N_features,) olarak döndür
+        return X_final[0]
+
+    except Exception as e:
+        logging.error(f"Recognition vector process error: {e}")
+        # Hata durumunda en azından raw features dön
+        return raw_features
+
+def identify_speaker_logic(processed_vector, threshold=0.90):
+    """İşlenmiş vektörü veritabanı ile Cosine Similarity kullanarak kıyaslar."""
+    if not models.speaker_vectors:
         return None
-    try:
-        # features_array is shape (N_features,)
-        # Reshape to (1, N_features)
-        X = features_array.reshape(1, -1)
-        # Predict
-        prediction = models.speaker_model.predict(X)[0]
-        # prediction is likely string (Actor_ID/User_ID)
-        return str(prediction)
-    except Exception as e:
-        logging.error(f"Speaker prediction error: {e}")
-        return None
 
-def run_training_background():
-    logging.info("Background training triggered.")
-    try:
-        train_speaker_model()
-        models.load_speaker_models()
-        logging.info("Background training finished and models reloaded.")
-    except Exception as e:
-        logging.error(f"Background training failed: {e}")
+    best_user = None
+    best_score = -1.0
 
-# --- Endpoints ---
+    # processed_vector tek boyutlu gelirse (N,), (1, N) yap
+    input_vec = processed_vector.reshape(1, -1)
 
-@app.route('/', methods=['POST'])
-def analyze():
-    try:
-        data = request.json
-        if not data:
-            return jsonify({"error": "Veri bulunamadı"}), 400
+    for user_id, vectors_list in models.speaker_vectors.items():
+        db_vectors = np.array(vectors_list)
+        # db_vectors: (M_samples, N_features)
 
-        segment_id = data.get('segment_id')
-        wav_base64 = data.get('wav_file')
-        text = data.get('text', '')
-        language = data.get('language', '')
-        start = data.get('start', 0.0)
-        end = data.get('end', 0.0)
+        if db_vectors.shape[1] != input_vec.shape[1]:
+            # Boyut uyuşmazlığı varsa (örn. model değiştiyse) atla
+            continue
 
-        if not wav_base64:
-            return jsonify({"error": "wav_file eksik"}), 400
+        similarities = cosine_similarity(input_vec, db_vectors)
+        # Kullanıcının kayıtlı tüm seslerine olan benzerliklerin en büyüğünü al
+        max_sim = np.max(similarities)
 
-        wav_bytes = base64.b64decode(wav_base64)
-        features = extract_features_from_bytes(wav_bytes, sr=16000)
-        columns = get_column_names()
+        if max_sim > best_score:
+            best_score = max_sim
+            best_user = user_id
 
-        if len(features) != len(columns):
-            logging.warning(f"Feature sayısı uyuşmazlığı! Beklenen: {len(columns)}, Çıkan: {len(features)}")
+    logging.info(f"En yakın: {best_user} | Skor: {best_score:.4f}")
 
-        df = pd.DataFrame([features], columns=columns)
-        audio_sentiment = predict_sentiment(df)
+    if best_score >= threshold:
+        return best_user
+    else:
+        return "Unknown"
 
-        # Speaker Identification
-        speaker_id = predict_speaker(features)
+# --- API ENDPOINTS ---
 
-        logging.info(f"Segment: {segment_id} | Tahmin: {audio_sentiment} | Speaker: {speaker_id} | Start: {start}")
-
-        response = {
-            "segment_id": segment_id,
-            "text": text,
-            "voice_sentiment": audio_sentiment,
-            "speaker": speaker_id,
-            "language": language,
-            "start": start,
-            "end": end,
-            "status": "success"
-        }
-
-        return jsonify(response)
-
-    except Exception as e:
-        logging.error(f"API Hatası: {e}")
-        return jsonify({"error": str(e)}), 500
-
-# --- YENİ EKLENEN ENDPOINT ---
 @app.route('/identificate', methods=['POST'])
 def identificate_user():
     """
-    Kullanıcı kaydı oluşturulduğunda ses dosyasını kaydeder ve CSV'ye işler.
-    Go tarafından gönderilen JSON: { "speaker": "USER_ID", "wav_file": "BASE64..." }
+    Kullanıcı kaydı yapar (Speaker Embedding'i veritabanına ekler).
     """
     try:
         data = request.json
-        if not data:
-            return jsonify({"error": "Veri bulunamadı"}), 400
+        if not data or 'speaker' not in data or 'wav_file' not in data:
+            return jsonify({"error": "Eksik veri"}), 400
 
-        user_id = data.get('speaker')  # Go tarafında 'speaker' alanına UserID basılıyor
-        wav_base64 = data.get('wav_file')
+        user_id = data['speaker']
+        wav_base64 = data['wav_file']
 
-        if not user_id or not wav_base64:
-            return jsonify({"error": "speaker veya wav_file eksik"}), 400
+        # 1. Base64 -> Bytes -> Features
+        wav_bytes = base64.b64decode(wav_base64)
+        raw_features = extract_features_from_bytes(wav_bytes)
 
-        # 1. Klasör Kontrolü / Oluşturma
-        records_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'identification_records')
-        if not os.path.exists(records_dir):
-            os.makedirs(records_dir)
-            logging.info(f"Klasör oluşturuldu: {records_dir}")
+        # 2. Recognition Pipeline (Scaler -> Selector)
+        processed_vector = process_recognition_vector(raw_features)
 
-        # 2. Dosya İsmi Oluşturma (Çakışmayı önlemek için timestamp kullanıyoruz)
-        timestamp = int(time.time())
-        filename = f"user_{user_id}_{timestamp}.wav"
-        file_path = os.path.join(records_dir, filename)
+        # 3. Veritabanına Ekle
+        models.add_speaker_vector(user_id, processed_vector)
 
-        # 3. Ses Dosyasını Kaydetme
-        try:
-            wav_bytes = base64.b64decode(wav_base64)
-            with open(file_path, "wb") as f:
-                f.write(wav_bytes)
-            logging.info(f"Ses dosyası kaydedildi: {file_path}")
-        except Exception as file_err:
-            logging.error(f"Dosya yazma hatası: {file_err}")
-            return jsonify({"error": "Dosya diske yazılamadı"}), 500
-
-        # 4. CSV Dosyasına Ekleme
-        csv_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'records.csv')
-        file_exists = os.path.isfile(csv_file_path)
-
-        try:
-            with open(csv_file_path, mode='a', newline='', encoding='utf-8') as csv_file:
-                fieldnames = ['user_id', 'file_path']
-                writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
-
-                # Dosya yeni oluşturuluyorsa başlıkları yaz
-                if not file_exists:
-                    writer.writeheader()
-
-                writer.writerow({'user_id': user_id, 'file_path': file_path})
-                logging.info(f"CSV güncellendi: {user_id} -> {file_path}")
-
-        except Exception as csv_err:
-            logging.error(f"CSV yazma hatası: {csv_err}")
-            return jsonify({"error": "CSV kaydı yapılamadı"}), 500
-
-        # 5. Trigger Training (Background)
-        threading.Thread(target=run_training_background).start()
-
-        return jsonify({"status": "success", "file_path": file_path, "message": "Training started"})
+        return jsonify({"status": "success", "message": f"User {user_id} saved."})
 
     except Exception as e:
-        logging.error(f"Identificate API Hatası: {e}")
+        logging.error(f"Identificate error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/', methods=['POST'])
+def analyze():
+    """
+    Gelen sesi analiz eder:
+    1. Duygu Analizi (Sentiment)
+    2. Konuşmacı Tanıma (Speaker Identification)
+    """
+    try:
+        data = request.json
+        if not data or 'wav_file' not in data:
+            return jsonify({"error": "Eksik veri"}), 400
+
+        wav_base64 = data['wav_file']
+        wav_bytes = base64.b64decode(wav_base64)
+
+        # 1. Ham Özellikler
+        raw_features = extract_features_from_bytes(wav_bytes)
+
+        # 2. Duygu Analizi
+        voice_sentiment = process_sentiment(raw_features)
+
+        # 3. Konuşmacı Tanıma (Embedding çıkarma + Similarity)
+        rec_vector = process_recognition_vector(raw_features)
+        speaker_id = identify_speaker_logic(rec_vector, threshold=0.90)
+
+        response = {
+            "segment_id": data.get('segment_id'),
+            "text": data.get('text', ''),
+            "voice_sentiment": voice_sentiment,
+            "speaker": speaker_id,
+            "language": data.get('language', ''),
+            "start": data.get('start', 0.0),
+            "end": data.get('end', 0.0),
+            "status": "success"
+        }
+        return jsonify(response)
+
+    except Exception as e:
+        logging.error(f"Analyze error: {e}")
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
