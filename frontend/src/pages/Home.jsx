@@ -47,7 +47,6 @@ const Home = () => {
                 try {
                     const data = JSON.parse(event.data);
                     if (data.type === 'live_analysis') {
-                        // Gelen payload içinde similarity_score da var
                         setSegments(prev => [...prev, data.payload]);
                     }
                 } catch (e) {
@@ -84,7 +83,6 @@ const Home = () => {
             if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
 
             const inputData = e.inputBuffer.getChannelData(0);
-            // Burada yukarıda tanımladığımız local fonksiyonu kullanıyoruz
             const pcmData = floatTo16BitPCM(inputData);
             socketRef.current.send(pcmData);
         };
@@ -158,25 +156,27 @@ const Home = () => {
                         <thead className="bg-gray-50 sticky top-0 z-10 shadow-sm">
                         <tr>
                             <th className="px-6 py-3 text-left text-xs font-bold text-gray-500 uppercase w-24">Süre</th>
-                            {/* Başlık güncellendi */}
                             <th className="px-6 py-3 text-left text-xs font-bold text-gray-500 uppercase w-40">Konuşmacı / Skor</th>
                             <th className="px-6 py-3 text-left text-xs font-bold text-gray-500 uppercase">Metin</th>
-                            <th className="px-6 py-3 text-left text-xs font-bold text-gray-500 uppercase w-32">Duygu</th>
+                            {/* DUYGU SÜTUNU İKİYE BÖLÜNDÜ */}
+                            <th className="px-6 py-3 text-left text-xs font-bold text-gray-500 uppercase w-32">Metin Duygusu</th>
+                            <th className="px-6 py-3 text-left text-xs font-bold text-gray-500 uppercase w-32">Ses Duygusu</th>
                         </tr>
                         </thead>
                         <tbody className="bg-white divide-y divide-gray-200">
                         {segments.length === 0 ? (
-                            <tr><td colSpan="4" className="px-6 py-12 text-center text-gray-400">Veri bekleniyor...</td></tr>
+                            <tr><td colSpan="5" className="px-6 py-12 text-center text-gray-400">Veri bekleniyor...</td></tr>
                         ) : (
                             segments.map((seg, index) => (
                                 <tr key={index} className="hover:bg-indigo-50">
                                     <td className="px-6 py-4 text-sm text-gray-500 font-mono">{formatTime(seg.start)}</td>
+
+                                    {/* Konuşmacı ve Skor */}
                                     <td className="px-6 py-4">
                                         <div className="flex items-center gap-2">
                                             <span className="bg-blue-100 text-blue-800 text-xs px-2 py-1 rounded-full font-bold">
                                                 {seg.speaker}
                                             </span>
-                                            {/* Skor gösterimi eklendi: Örn: %85 */}
                                             {seg.similarity_score !== undefined && (
                                                 <span className="text-xs text-gray-500 font-mono">
                                                    %{(seg.similarity_score * 100).toFixed(0)}
@@ -184,8 +184,31 @@ const Home = () => {
                                             )}
                                         </div>
                                     </td>
+
                                     <td className="px-6 py-4 text-sm text-gray-900">{seg.text}</td>
-                                    <td className="px-6 py-4 text-sm">{seg.textSentiment}</td>
+
+                                    {/* Metin Duygusu */}
+                                    <td className="px-6 py-4">
+                                        <span className={`text-xs px-2 py-1 rounded-full border ${
+                                            seg.textSentiment === 'Olumlu' ? 'bg-green-50 text-green-700 border-green-200' :
+                                                seg.textSentiment === 'Olumsuz' ? 'bg-red-50 text-red-700 border-red-200' :
+                                                    'bg-gray-100 text-gray-700 border-gray-200'
+                                        }`}>
+                                            {seg.textSentiment}
+                                        </span>
+                                    </td>
+
+                                    {/* Ses Duygusu */}
+                                    <td className="px-6 py-4">
+                                         <span className={`text-xs px-2 py-1 rounded-full border ${
+                                             seg.voiceSentiment === 'Mutlu' ? 'bg-green-50 text-green-700 border-green-200' :
+                                                 seg.voiceSentiment === 'Kızgın' ? 'bg-red-50 text-red-700 border-red-200' :
+                                                     seg.voiceSentiment === 'Üzgün' ? 'bg-orange-50 text-orange-700 border-orange-200' :
+                                                         'bg-gray-100 text-gray-700 border-gray-200'
+                                         }`}>
+                                            {seg.voiceSentiment}
+                                        </span>
+                                    </td>
                                 </tr>
                             ))
                         )}
