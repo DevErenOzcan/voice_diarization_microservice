@@ -1,10 +1,8 @@
 package database
 
 import (
-	"log"
-	"os"
-
 	"gateway/models"
+	"log"
 
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -14,10 +12,6 @@ import (
 var DB *gorm.DB
 
 func Init() {
-	if err := os.MkdirAll(models.RecordDir, 0755); err != nil {
-		log.Fatal("Klasör oluşturma hatası:", err)
-	}
-
 	var err error
 	// GORM ile SQLite bağlantısı
 	DB, err = gorm.Open(sqlite.Open(models.DBName), &gorm.Config{

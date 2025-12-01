@@ -9,7 +9,6 @@ const (
 	PacketSize      = 640
 	MinSegmentBytes = SampleRate * 2 * 3
 	DBName          = "db.sqlite"
-	RecordDir       = "record_matches"
 )
 
 // --- Veritabanı Modelleri (GORM) ---
