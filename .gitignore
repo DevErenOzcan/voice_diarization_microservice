@@ -115,8 +115,8 @@ cython_debug/
 frontend/.idea/
 gateway/.idea/
 whisperX/.idea/
-analyze/.venv/
+voice_analyze/.venv/
 
 # mdoels
-analyze/models/text_sentiment/tf_model.h5
+voice_analyze/models/text_sentiment/tf_model.h5
 # End of consolidated .gitignore
