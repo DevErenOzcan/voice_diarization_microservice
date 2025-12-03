@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"sync" // WaitGroup için gerekli
+	"sync"
 	"time"
 
 	"gateway/database"
@@ -25,13 +25,11 @@ func HandleLiveAudio(w http.ResponseWriter, r *http.Request) {
 		log.Println("WS Upgrade Error:", err)
 		return
 	}
-	// Bağlantıyı fonksiyon sonunda kapat, ancak önce WaitGroup'u bekle
 	defer conn.Close()
 
 	sessionID := fmt.Sprintf("sess_%d", time.Now().Unix())
 	log.Printf("Canlı analiz başladı: %s", sessionID)
 
-	// Session kaydını oluştur
 	newRecord := models.Record{
 		ID:   sessionID,
 		Date: time.Now(),
@@ -47,7 +45,7 @@ func HandleLiveAudio(w http.ResponseWriter, r *http.Request) {
 		isSpeaking     bool
 		silenceCounter int
 		bytesProcessed int
-		wg             sync.WaitGroup // Asenkron işlemler için bekleme grubu
+		wg             sync.WaitGroup
 	)
 
 	connLock := &sync.Mutex{}
@@ -59,20 +57,17 @@ func HandleLiveAudio(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 
-		// 1. "STOP" mesajı kontrolü (Frontend durdur butonuna bastığında)
 		if msgType == websocket.TextMessage && string(data) == "STOP" {
 			log.Println("Durdurma isteği alındı, tampon temizleniyor...")
-
-			// Eğer elde işlenmemiş segment varsa, onu zorla işle
 			if len(currentSegment) > 0 {
 				segmentCopy := make([]byte, len(currentSegment))
 				copy(segmentCopy, currentSegment)
 				offsetSec := float64(bytesProcessed-len(currentSegment)) / float64(models.SampleRate*2)
 
-				wg.Add(1) // Bekleme grubuna ekle
+				wg.Add(1)
 				go processAndRespond(sessionID, segmentCopy, offsetSec, conn, connLock, &wg)
 			}
-			break // Döngüden çık, aşağıdaki wg.Wait() çalışsın
+			break
 		}
 
 		if msgType != websocket.BinaryMessage {
@@ -108,8 +103,7 @@ func HandleLiveAudio(w http.ResponseWriter, r *http.Request) {
 				copy(segmentCopy, currentSegment)
 				offsetSec := float64(frameStart-len(currentSegment)) / float64(models.SampleRate*2)
 
-				// Go Routine içinde servislere gönder
-				wg.Add(1) // Bekleme grubuna ekle
+				wg.Add(1)
 				go processAndRespond(sessionID, segmentCopy, offsetSec, conn, connLock, &wg)
 
 				currentSegment = nil
@@ -119,15 +113,15 @@ func HandleLiveAudio(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Döngü bittiğinde (STOP geldiğinde), tüm asenkron işlemlerin bitmesini bekle
 	wg.Wait()
 	log.Println("Analiz oturumu sonlandırıldı:", sessionID)
 }
 
-// processAndRespond güncellendi: ID -> İsim Soyisim dönüşümü eklendi
+// processAndRespond: Split (ayrılmış) mimariye göre güncellendi
 func processAndRespond(recordID string, pcmData []byte, offset float64, conn *websocket.Conn, mu *sync.Mutex, wg *sync.WaitGroup) {
-	defer wg.Done() // İşlem bitince WaitGroup'tan düş
+	defer wg.Done()
 
+	// 1. Whisper Servisi: Sesi Metne Çevir
 	whisperResp, err := services.CallWhisperService(pcmData)
 	if err != nil {
 		log.Println("Whisper Error:", err)
@@ -135,69 +129,72 @@ func processAndRespond(recordID string, pcmData []byte, offset float64, conn *we
 	}
 
 	for _, seg := range whisperResp.Segments {
+		// WAV oluştur (Audio servisi wav formatı bekler)
 		wavData := services.CreateWav(pcmData)
-		payload := models.ServicePayload{
-			RecordID: recordID,
-			Text:     seg.Text,
-			WavFile:  wavData,
-			Language: whisperResp.Language,
-		}
 
-		analyzeResp, err := services.CallAnalyzeService(payload)
+		// 2. Text Service: Metin Duygu Analizi (Bağımsız Çağrı)
+		textSentiment, err := services.CallTextSentimentService(seg.Text)
 		if err != nil {
-			log.Println("Analyze Error:", err)
-			continue
+			log.Printf("Text Sentiment Error (Text: %s): %v", seg.Text, err)
+			textSentiment = "Nötr" // Hata durumunda varsayılan
 		}
 
-		// --- DEĞİŞİKLİK BURADA BAŞLIYOR ---
-		// Gelen speaker ID'si (örn: "1" veya "Unknown") üzerinden ismi bul
-		displaySpeaker := analyzeResp.Speaker // Varsayılan olarak ID kalsın
+		// 3. Audio Service: Ses Duygusu ve Konuşmacı Tanıma (Bağımsız Çağrı)
+		audioPayload := models.ServicePayload{WavFile: wavData}
+		audioResp, err := services.CallAudioAnalyzeService(audioPayload)
+		if err != nil {
+			log.Println("Audio Analyze Error:", err)
+			// Hata durumunda varsayılan değerler
+			audioResp = models.ServicePayload{
+				VoiceSentiment:  "Bilinmiyor",
+				Speaker:         "Unknown",
+				SimilarityScore: 0.0,
+			}
+		}
 
-		if analyzeResp.Speaker != "Unknown" && analyzeResp.Speaker != "" {
+		// 4. Konuşmacı ID'sini İsim Soyisime Çevirme (Gateway'in görevi)
+		displaySpeaker := audioResp.Speaker // Varsayılan olarak ID kalsın (örn: "1")
+		if audioResp.Speaker != "Unknown" && audioResp.Speaker != "" {
 			var user models.User
 			// Veritabanında ID'ye göre kullanıcıyı ara
-			// analyzeResp.Speaker string olduğu için, veritabanı sorgusunda ID ile eşleşmesi gerekir.
-			if result := database.DB.First(&user, "id = ?", analyzeResp.Speaker); result.Error == nil {
-				// Kullanıcı bulunduysa format: "Ad Soyad"
+			if result := database.DB.First(&user, "id = ?", audioResp.Speaker); result.Error == nil {
 				displaySpeaker = fmt.Sprintf("%s %s", user.Name, user.Surname)
 			}
 		}
-		// --- DEĞİŞİKLİK BURADA BİTİYOR ---
 
 		finalStart := offset + seg.Start
 		finalEnd := offset + seg.End
 
 		// Veritabanına segmenti kaydet
-		// Speaker alanına artık Ad Soyad yazıyoruz
 		newSegment := models.Segment{
 			RecordID:        recordID,
 			StartOffset:     finalStart,
 			EndOffset:       finalEnd,
-			Text:            analyzeResp.Text,
-			TextSentiment:   analyzeResp.TextSentiment,
-			VoiceSentiment:  analyzeResp.VoiceSentiment,
-			Speaker:         displaySpeaker, // ID yerine isim
-			SimilarityScore: analyzeResp.SimilarityScore,
+			Text:            seg.Text,
+			TextSentiment:   textSentiment,            // Text servisinden geldi
+			VoiceSentiment:  audioResp.VoiceSentiment, // Audio servisinden geldi
+			Speaker:         displaySpeaker,           // DB'den çözüldü
+			SimilarityScore: audioResp.SimilarityScore,
 		}
 		database.DB.Create(&newSegment)
 
+		// Frontend'e yanıt gönder
 		response := map[string]interface{}{
 			"type": "live_analysis",
 			"payload": models.LiveAnalysisResult{
 				Start:           finalStart,
 				End:             finalEnd,
-				Text:            analyzeResp.Text,
-				TextSentiment:   analyzeResp.TextSentiment,
-				VoiceSentiment:  analyzeResp.VoiceSentiment,
-				Speaker:         displaySpeaker, // ID yerine isim frontend'e gidiyor
-				SimilarityScore: analyzeResp.SimilarityScore,
+				Text:            seg.Text,
+				TextSentiment:   textSentiment,
+				VoiceSentiment:  audioResp.VoiceSentiment,
+				Speaker:         displaySpeaker,
+				SimilarityScore: audioResp.SimilarityScore,
 			},
 		}
 
 		mu.Lock()
-		// Bağlantı kapanmadan yazmaya çalış
 		if err := conn.WriteJSON(response); err != nil {
-			log.Println("WS Write Error (muhtemelen bağlantı kapandı):", err)
+			log.Println("WS Write Error:", err)
 		}
 		mu.Unlock()
 	}
