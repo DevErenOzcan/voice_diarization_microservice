@@ -3,11 +3,22 @@ import logging
 import traceback
 from flask import Flask, request, jsonify
 from transformers import pipeline, AutoTokenizer, TFAutoModelForSequenceClassification
+import google.generativeai as genai
 
 # Loglama ayarları
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 app = Flask(__name__)
+
+# --- GEMINI AYARLARI ---
+# API Key'i ortam değişkenlerinden alıyoruz.
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    logging.info("Gemini API Key başarıyla yapılandırıldı.")
+else:
+    logging.warning("UYARI: GEMINI_API_KEY ortam değişkeni bulunamadı! Konu analizi çalışmayacaktır.")
 
 # Dizin Ayarları
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -58,6 +69,44 @@ def process_text_sentiment(text):
         logging.error(f"Processing error: {e}")
         return "Hata"
 
+def determine_topic_llm(text):
+    """
+    Google Gemini modelini kullanarak metinden konu başlığı çıkarır.
+    """
+    if not GEMINI_API_KEY:
+        return "API Key Eksik"
+
+    if not text or len(text) < 5:
+        return "Kısa Konuşma"
+
+    try:
+        model = genai.GenerativeModel('models/gemini-2.5-flash')
+
+        prompt = f"""
+        Aşağıdaki konuşma metnini analiz et ve bu konuşmaya uygun, 
+        kısa (maksimum 3-5 kelime) Türkçe bir konu başlığı ver.
+        Sadece başlığı yaz, açıklama yapma.
+        
+        Metin:
+        {text}
+        """
+
+        # generate_content metodu çağrılıyor
+        response = model.generate_content(prompt)
+
+        # Yanıt metnini al ve temizle
+        if response.text:
+            topic = response.text.strip().replace('"', '').replace("'", "").replace("**", "")
+            return topic
+        else:
+            return "Konu Belirlenemedi"
+
+    except Exception as e:
+        logging.error(f"Gemini API Hatası: {e}")
+        # Hata detayını loglarda görmek için traceback ekleyebiliriz
+        logging.error(traceback.format_exc())
+        return "Genel Konuşma (API Hatası)"
+
 @app.route('/sentiment', methods=['POST'])
 def analyze_text():
     try:
@@ -73,6 +122,29 @@ def analyze_text():
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route('/analyze_topic', methods=['POST'])
+def analyze_topic():
+    """
+    Konuşmanın tamamını alır ve Gemini ile konu başlığı üretir.
+    """
+    try:
+        data = request.json
+        text = data.get('text', '')
+
+        logging.info(f"Topic Analysis İsteği Alındı. Metin uzunluğu: {len(text)}")
+
+        topic = determine_topic_llm(text)
+
+        logging.info(f"Topic Result: {topic}")
+
+        return jsonify({
+            "status": "success",
+            "topic": topic
+        })
+    except Exception as e:
+        logging.error(f"Topic analysis error: {e}")
+        return jsonify({"error": str(e), "topic": "Analiz Hatası"}), 500
 
 if __name__ == '__main__':
     # Bu servis 5002 portunda çalışacak

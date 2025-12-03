@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings" // Metin birleştirme için eklendi
 	"sync"
 	"time"
 
@@ -113,8 +114,45 @@ func HandleLiveAudio(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Tüm işlemlerin (Whisper/Sentiment vs) bitmesini bekle
 	wg.Wait()
-	log.Println("Analiz oturumu sonlandırıldı:", sessionID)
+	log.Println("Analiz oturumu sonlandırıldı, konu analizi başlıyor:", sessionID)
+
+	// --- KONU ANALİZİ (POST-PROCESSING) ---
+	go func() {
+		// 1. Bu kayıt için tüm segmentleri veritabanından çek
+		var segments []models.Segment
+		if err := database.DB.Where("record_id = ?", sessionID).Order("start_offset asc").Find(&segments).Error; err != nil {
+			log.Println("Segmentler çekilemedi:", err)
+			return
+		}
+
+		if len(segments) == 0 {
+			return
+		}
+
+		// 2. Metinleri birleştir
+		var fullTextBuilder strings.Builder
+		for _, seg := range segments {
+			fullTextBuilder.WriteString(seg.Text)
+			fullTextBuilder.WriteString(" ")
+		}
+		fullText := strings.TrimSpace(fullTextBuilder.String())
+
+		// 3. Konu Analizi Servisini Çağır
+		topic, err := services.CallTopicAnalysisService(fullText)
+		if err != nil {
+			log.Println("Konu analizi servisi hatası:", err)
+			topic = "Belirsiz"
+		}
+
+		// 4. Kaydı güncelle
+		if err := database.DB.Model(&models.Record{}).Where("id = ?", sessionID).Update("topic", topic).Error; err != nil {
+			log.Println("Record topic update hatası:", err)
+		} else {
+			log.Printf("Kayıt (%s) konusu güncellendi: %s", sessionID, topic)
+		}
+	}()
 }
 
 // processAndRespond: Split (ayrılmış) mimariye göre güncellendi

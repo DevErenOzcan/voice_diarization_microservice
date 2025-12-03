@@ -89,6 +89,28 @@ func CallTextSentimentService(text string) (string, error) {
 	return sentiment, nil
 }
 
+// CallTopicAnalysisService: Konuşmanın tamamı için konu analizi (Chatbot/LLM)
+func CallTopicAnalysisService(fullText string) (string, error) {
+	requestBody := map[string]string{"text": fullText}
+	jsonData, _ := json.Marshal(requestBody)
+
+	// Endpoint: /analyze_topic
+	// TextServiceURL (5002) üzerinden hizmet veriyoruz
+	resp, err := httpClient.Post(TextServiceURL+"analyze_topic", "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	var responseMap map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&responseMap); err != nil {
+		return "", err
+	}
+
+	topic, _ := responseMap["topic"].(string)
+	return topic, nil
+}
+
 // CallIdentificateService: Kullanıcı ses kaydı (Speaker Enrollment)
 func CallIdentificateService(userID uint, wavData []byte) error {
 	payload := models.ServicePayload{
