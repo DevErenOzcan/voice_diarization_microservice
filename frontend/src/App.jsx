@@ -19,7 +19,7 @@ const NavBar = () => {
         <nav className="bg-indigo-800 text-white p-4 shadow-lg">
             <div className="container mx-auto flex justify-between items-center">
                 <div className="text-xl font-bold flex items-center gap-2">
-                    AI Sekreter
+                    Voice Recognition
                 </div>
                 <div className="flex gap-4">
                     <Link to="/" className={navClass('/')}><Mic size={18}/> Canlı Analiz</Link>

@@ -139,8 +139,12 @@ const Users = () => {
                             <input placeholder="Soyisim" className="w-full border p-2 rounded" value={formData.surname} onChange={e => setFormData({...formData, surname: e.target.value})} />
 
                             <div className="bg-blue-50 p-4 rounded text-sm text-blue-800">
-                                <p className="mb-2 font-semibold">Ses Kaydı:</p>
-                                Lütfen isminizi ve soyisminizi net bir şekilde söyleyiniz.
+                                <p className="mb-2 font-semibold">Aşşağıdaki Metni Seslendiriniz:</p>
+                                "Hayat, çoğu zaman biz büyük planlar yaparken sessizce akıp giden anlardan ibarettir. Dünü değiştiremeyiz; o artık yaşanmış ve bitmiştir. Yarın ise henüz gelmemiş bir ihtimaldir. Elimizde olan tek gerçek güç, tam şu andır. Çoğumuz 'doğru zamanı' bekleyerek ömrümüzü bekleme odasında geçiriyoruz. Oysa doğru zaman, onu yarattığınız andır.
+
+                                Bir dakika, aslında çok kısa gibi görünse de, bir karar vermek için yeterince uzundur. Hayatınızın yönünü değiştirmek, ertelediğiniz bir hayale adım atmak veya sadece kendinize 'yapabilirim' demek için saatlere ihtiyacınız yok. Önemli olan, o ilk adımı atma cesaretini göstermektir. Unutmayın, en görkemli zirvelere bile küçük, kararlı adımlarla çıkılır.
+
+                                Bugün, bahaneleri bir kenara bırakıp potansiyelinizi kucaklama günü olsun. Geçmişin yükünü sırtınızdan indirin ve derin bir nefes alın. Çünkü hikayenizin kalemi sizin elinizde ve en güzel bölümü yazmak için hala vaktiniz var."
                             </div>
 
                             {!isRecording ? (
