@@ -1,50 +1,50 @@
-# Gerçek Zamanlı Ses ve Duygu Analizi Sistemi
+# Real-Time Voice and Sentiment Analysis System
 
-Bu proje, mikroservis mimarisi kullanılarak geliştirilmiş, gerçek zamanlı konuşma dökümü (STT), konuşmacı ayrımı (diarization), duygu analizi ve konuşmacı tanıma özelliklerine sahip kapsamlı bir ses analiz sistemidir.
+This project is a comprehensive voice analysis system developed using microservice architecture, featuring real-time speech-to-text (STT), speaker diarization, sentiment analysis, and speaker identification capabilities.
 
-## Mimariler ve İşleyiş
+## Architectures and Workflows
 
-### 1. Canlı Ses Analizi (Live Audio Analysis)
+### 1. Live Audio Analysis
 
-Bu modül, canlı bir görüşme sırasında sesin yakalanıp, metne dökülmesi, konuşmacıların ayrıştırılması ve hem metin hem de ses tonu üzerinden duygu analizi yapılmasını sağlar.
+This module captures audio during a live conversation, transcribes it into text, separates speakers, and performs sentiment analysis based on both the text content and the tone of voice.
 
-![Canlı Ses Analizi Mimarisi](assets/live_analysis_architecture.png)
+![Live Audio Analysis Architecture](assets/live_analysis_architecture.png)
 
-**Çalışma Mantığı:**
-1.  **Frontend (Vite):** Kullanıcı arayüzü üzerinden ses kaydı başlatılır ve ses verisi stream edilir.
-2.  **Go Gateway Service:** Gelen ses verisini karşılar ve ilgili servislere yönlendirir.
-3.  **WhisperX Service:** Sesi işleyerek metne döker (Speech-to-Text) ve konuşmacı ayrımı (Diarization) yapar. Hangi cümlenin kim tarafından söylendiğini belirler.
-4.  **Text Analysis Service:** Elde edilen metin üzerinde duygu analizi (Pozitif, Negatif, Nötr) yapar.
-5.  **Voice Analysis Service:** Ses segmentlerini analiz ederek konuşmacının o anki duygu durumunu (Örn: Kızgın, Mutlu) ve kimliğini tespit eder.
-6.  **Sonuç:** Tüm analiz sonuçları birleştirilerek anlık olarak Frontend'e iletilir ve tabloda gösterilir.
+**Workflow Logic:**
+1.  **Frontend (Vite):** Audio recording is initiated via the user interface, and audio data is streamed.
+2.  **Go Gateway Service:** Receives the incoming audio data and routes it to the relevant services.
+3.  **WhisperX Service:** Processes the audio to transcribe it (Speech-to-Text) and performs diarization. It determines which sentence was spoken by whom.
+4.  **Text Analysis Service:** Performs sentiment analysis (Positive, Negative, Neutral) on the transcribed text.
+5.  **Voice Analysis Service:** Analyzes audio segments to detect the speaker's current emotional state (e.g., Angry, Happy) and their identity.
+6.  **Result:** All analysis results are aggregated and sent back to the Frontend in real-time to be displayed in the table.
 
-**Ekran Görüntüsü:**
-Aşağıda canlı analiz ekranının bir örneği görülmektedir.
-![Canlı Ses Analizi Ekranı](assets/live_analysis_ui.png)
+**Screenshot:**
+An example of the live analysis screen can be seen below.
+![Live Analysis Screen](assets/live_analysis_ui.png)
 
 ---
 
-### 2. Kullanıcı Kaydı (User Registration)
+### 2. User Registration
 
-Sistemin konuşmacıları tanıması için (Speaker Identification), kullanıcıların ses örnekleriyle sisteme kayıt olması gerekmektedir.
+In order for the system to recognize speakers (Speaker Identification), users must register with the system using voice samples.
 
-![Kullanıcı Kayıt Mimarisi](assets/user_registration_architecture.png)
+![User Registration Architecture](assets/user_registration_architecture.png)
 
-**Çalışma Mantığı:**
-1.  **Frontend:** Kullanıcı Ad, Soyad bilgilerini girer ve belirtilen metni sesli olarak okur.
-2.  **Go Gateway:** Form verisini ve ses dosyasını alır.
-    *   Kullanıcı meta verilerini (Ad, Soyad vb.) **Main DB (Speaker Meta)** veritabanına kaydeder.
-    *   Ses dosyasını analiz servisine iletir.
+**Workflow Logic:**
+1.  **Frontend:** The user enters their Name and Surname and reads the specified text aloud.
+2.  **Go Gateway:** Receives the form data and the audio file.
+    * Saves user metadata (Name, Surname, etc.) to the **Main DB (Speaker Meta)**.
+    * Forwards the audio file to the analysis service.
 3.  **Voice Analyze Service:**
-    *   Gelen sesten öznitelik çıkarımı (Feature Extraction) yapar.
-    *   Kullanıcının ses imzasını (vektörünü) **Voice DB (Embeddings)** veritabanına kaydeder.
-4.  **Sonuç:** Kayıt işlemi tamamlandığında kullanıcıya başarı mesajı döner.
+    * Performs Feature Extraction on the incoming audio.
+    * Saves the user's voice signature (vector) to the **Voice DB (Embeddings)**.
+4.  **Result:** A success message is returned to the user once the registration process is complete.
 
-**Ekran Görüntüleri:**
-Kullanıcı kayıt formu ve kayıtlı kişiler listesi aşağıdadır.
+**Screenshots:**
+The user registration form and the list of registered persons are shown below.
 
-*Yeni Kişi Kaydı:*
-![Yeni Kişi Kaydı](assets/user_registration_ui.png)
+*New Person Registration:*
+![New Person Registration](assets/user_registration_ui.png)
 
-*Kayıtlı Kişiler Listesi:*
-![Kayıtlı Kişiler](assets/user_list_ui.png)
+*Registered Persons List:*
+![Registered Persons](assets/user_list_ui.png)
