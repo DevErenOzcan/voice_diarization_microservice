@@ -22,9 +22,9 @@ const NavBar = () => {
                     Voice Recognition
                 </div>
                 <div className="flex gap-4">
-                    <Link to="/" className={navClass('/')}><Mic size={18}/> Canlı Analiz</Link>
-                    <Link to="/users" className={navClass('/users')}><UsersIcon size={18}/> Kişiler</Link>
-                    <Link to="/records" className={navClass('/records')}><FileText size={18}/> Kayıtlar</Link>
+                    <Link to="/" className={navClass('/')}><Mic size={18}/> Live Analysis</Link>
+                    <Link to="/users" className={navClass('/users')}><UsersIcon size={18}/> People</Link>
+                    <Link to="/records" className={navClass('/records')}><FileText size={18}/> Records</Link>
                 </div>
             </div>
         </nav>
