@@ -6,7 +6,7 @@ const Users = () => {
     const [loading, setLoading] = useState(true);
     const [showModal, setShowModal] = useState(false);
 
-    // Form ve Kayıt State'leri
+    // Form and Recording States
     const [formData, setFormData] = useState({ name: '', surname: '' });
     const [isRecording, setIsRecording] = useState(false);
     const [audioBlob, setAudioBlob] = useState(null);
@@ -14,14 +14,14 @@ const Users = () => {
     const mediaRecorderRef = useRef(null);
     const audioChunksRef = useRef([]);
 
-    // 1. Kullanıcı Listesini Çek (GET)
+    // 1. Fetch User List (GET)
     const fetchUsers = async () => {
         try {
             const res = await fetch('/api/users');
             const data = await res.json();
             setUsers(data || []);
         } catch (error) {
-            console.error("Kullanıcılar çekilemedi:", error);
+            console.error("Could not fetch users:", error);
         } finally {
             setLoading(false);
         }
@@ -31,11 +31,11 @@ const Users = () => {
         fetchUsers();
     }, []);
 
-    // --- Basitleştirilmiş Ses Kayıt İşlemleri ---
+    // --- Simplified Voice Recording Operations ---
     const startRecording = async () => {
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            // Tarayıcının desteklediği varsayılan formatta kayıt (Genelde WebM)
+            // Record in default format supported by browser (Usually WebM)
             mediaRecorderRef.current = new MediaRecorder(stream);
             audioChunksRef.current = [];
 
@@ -44,7 +44,7 @@ const Users = () => {
             };
 
             mediaRecorderRef.current.onstop = () => {
-                // Ham veriyi Blob haline getir (Backend bunu WAV'a çevirecek)
+                // Convert raw data to Blob (Backend should convert this to WAV)
                 const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
                 setAudioBlob(blob);
             };
@@ -52,7 +52,7 @@ const Users = () => {
             mediaRecorderRef.current.start();
             setIsRecording(true);
         } catch (error) {
-            alert("Mikrofona erişilemedi.");
+            alert("Microphone could not be accessed.");
         }
     };
 
@@ -64,15 +64,15 @@ const Users = () => {
         }
     };
 
-    // 2. Yeni Kullanıcı Kaydet (POST - FormData)
+    // 2. Register New User (POST - FormData)
     const handleSaveUser = async () => {
-        if (!formData.name || !formData.surname) return alert("İsim/Soyisim giriniz.");
-        if (!audioBlob) return alert("Ses kaydı yapınız.");
+        if (!formData.name || !formData.surname) return alert("Please enter Name/Surname.");
+        if (!audioBlob) return alert("Please record audio.");
 
         const data = new FormData();
         data.append('name', formData.name);
         data.append('surname', formData.surname);
-        // Dosyayı 'recording.webm' olarak gönderiyoruz, backend uzantıyı kontrol edip dönüştürmeli
+        // Sending file as 'recording.webm', backend should check extension and convert
         data.append('voice_record_file', audioBlob, 'recording.webm');
 
         try {
@@ -82,39 +82,39 @@ const Users = () => {
             });
 
             if (res.ok) {
-                alert("Kullanıcı başarıyla oluşturuldu.");
+                alert("User successfully created.");
                 setShowModal(false);
                 setFormData({ name: '', surname: '' });
                 setAudioBlob(null);
-                fetchUsers(); // Listeyi yenile
+                fetchUsers(); // Refresh list
             } else {
-                alert("Kaydetme başarısız oldu.");
+                alert("Save failed.");
             }
         } catch (error) {
-            console.error("Hata:", error);
-            alert("Sunucu hatası.");
+            console.error("Error:", error);
+            alert("Server error.");
         }
     };
 
     return (
         <div className="p-6">
             <div className="flex justify-between items-center mb-6">
-                <h1 className="text-2xl font-bold text-gray-800">Kayıtlı Kişiler</h1>
+                <h1 className="text-2xl font-bold text-gray-800">Registered People</h1>
                 <button onClick={() => setShowModal(true)} className="bg-indigo-600 text-white px-4 py-2 rounded-lg flex items-center gap-2 hover:bg-indigo-700">
-                    <UserPlus size={20} /> Yeni Kullanıcı Ekle
+                    <UserPlus size={20} /> Add New User
                 </button>
             </div>
 
             <div className="bg-white rounded-lg shadow overflow-hidden">
                 {loading ? (
-                    <div className="p-8 text-center text-gray-500 flex justify-center items-center"><Loader className="animate-spin mr-2"/> Yükleniyor...</div>
+                    <div className="p-8 text-center text-gray-500 flex justify-center items-center"><Loader className="animate-spin mr-2"/> Loading...</div>
                 ) : (
                     <table className="min-w-full divide-y divide-gray-200">
                         <thead className="bg-gray-50">
                         <tr>
-                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">İsim</th>
-                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Soyisim</th>
-                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Kayıt Tarihi</th>
+                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
+                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Surname</th>
+                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Registration Date</th>
                         </tr>
                         </thead>
                         <tbody className="bg-white divide-y divide-gray-200">
@@ -133,34 +133,34 @@ const Users = () => {
             {showModal && (
                 <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
                     <div className="bg-white rounded-xl max-w-md w-full p-6">
-                        <h2 className="text-xl font-bold mb-4">Yeni Kişi Kaydı</h2>
+                        <h2 className="text-xl font-bold mb-4">New Person Registration</h2>
                         <div className="space-y-4">
-                            <input placeholder="İsim" className="w-full border p-2 rounded" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} />
-                            <input placeholder="Soyisim" className="w-full border p-2 rounded" value={formData.surname} onChange={e => setFormData({...formData, surname: e.target.value})} />
+                            <input placeholder="Name" className="w-full border p-2 rounded" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} />
+                            <input placeholder="Surname" className="w-full border p-2 rounded" value={formData.surname} onChange={e => setFormData({...formData, surname: e.target.value})} />
 
                             <div className="bg-blue-50 p-4 rounded text-sm text-blue-800">
-                                <p className="mb-2 font-semibold">Aşşağıdaki Metni Seslendiriniz:</p>
-                                "Hayat, çoğu zaman biz büyük planlar yaparken sessizce akıp giden anlardan ibarettir. Dünü değiştiremeyiz; o artık yaşanmış ve bitmiştir. Yarın ise henüz gelmemiş bir ihtimaldir. Elimizde olan tek gerçek güç, tam şu andır. Çoğumuz 'doğru zamanı' bekleyerek ömrümüzü bekleme odasında geçiriyoruz. Oysa doğru zaman, onu yarattığınız andır.
+                                <p className="mb-2 font-semibold">Please read the text below:</p>
+                                "Life is mostly composed of moments that slip away silently while we make big plans. We cannot change yesterday; it has already happened and ended. Tomorrow is a possibility that has not yet arrived. The only real power we have is right now. Most of us spend our lives in the waiting room, waiting for the 'right time'. However, the right time is the moment you create it.
 
-                                Bir dakika, aslında çok kısa gibi görünse de, bir karar vermek için yeterince uzundur. Hayatınızın yönünü değiştirmek, ertelediğiniz bir hayale adım atmak veya sadece kendinize 'yapabilirim' demek için saatlere ihtiyacınız yok. Önemli olan, o ilk adımı atma cesaretini göstermektir. Unutmayın, en görkemli zirvelere bile küçük, kararlı adımlarla çıkılır.
+                                A minute, although it seems very short, is long enough to make a decision. You don't need hours to change the direction of your life, to take a step towards a dream you postponed, or just to say 'I can do it' to yourself. The important thing is to show the courage to take that first step. Remember, even the most magnificent peaks are climbed with small, determined steps.
 
-                                Bugün, bahaneleri bir kenara bırakıp potansiyelinizi kucaklama günü olsun. Geçmişin yükünü sırtınızdan indirin ve derin bir nefes alın. Çünkü hikayenizin kalemi sizin elinizde ve en güzel bölümü yazmak için hala vaktiniz var."
+                                Let today be the day you put aside excuses and embrace your potential. Take the burden of the past off your back and take a deep breath. Because the pen of your story is in your hand and you still have time to write the most beautiful chapter."
                             </div>
 
                             {!isRecording ? (
                                 <button onClick={startRecording} className={`w-full py-3 rounded flex items-center justify-center gap-2 ${audioBlob ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-700'}`}>
-                                    <Mic size={20} /> {audioBlob ? 'Yeniden Kaydet' : 'Ses Kaydet'}
+                                    <Mic size={20} /> {audioBlob ? 'Re-record' : 'Record Audio'}
                                 </button>
                             ) : (
                                 <button onClick={stopRecording} className="w-full py-3 rounded flex items-center justify-center gap-2 bg-red-500 text-white animate-pulse">
-                                    <StopCircle size={20} /> Kaydı Bitir
+                                    <StopCircle size={20} /> Stop Recording
                                 </button>
                             )}
 
                             <div className="flex gap-2 mt-4 pt-4 border-t">
-                                <button onClick={() => setShowModal(false)} className="flex-1 border py-2 rounded">İptal</button>
+                                <button onClick={() => setShowModal(false)} className="flex-1 border py-2 rounded">Cancel</button>
                                 <button onClick={handleSaveUser} disabled={!audioBlob || isRecording} className={`flex-1 text-white py-2 rounded flex justify-center gap-2 ${(!audioBlob || isRecording) ? 'bg-gray-400' : 'bg-indigo-600'}`}>
-                                    <Save size={18}/> Kaydet
+                                    <Save size={18}/> Save
                                 </button>
                             </div>
                         </div>
