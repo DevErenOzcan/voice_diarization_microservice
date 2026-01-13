@@ -20,6 +20,19 @@ const Records = () => {
             });
     }, []);
 
+    // Helper function to format date in English
+    const formatDate = (dateString) => {
+        if (!dateString) return 'N/A';
+        const date = new Date(dateString);
+        return new Intl.DateTimeFormat('en-US', {
+            day: 'numeric',
+            month: 'long',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit'
+        }).format(date);
+    };
+
     if (loading) {
         return <div className="flex justify-center items-center h-64 text-indigo-600"><Loader className="animate-spin mr-2" /> Loading...</div>;
     }
@@ -43,7 +56,8 @@ const Records = () => {
                     ) : (
                         records.map((record) => (
                             <tr key={record.id} onClick={() => navigate(`/records/${record.id}`)} className="cursor-pointer hover:bg-indigo-50 transition-colors">
-                                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{record.date}</td>
+                                {/* Formatted Date used here */}
+                                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{formatDate(record.date)}</td>
                                 <td className="px-6 py-4 whitespace-nowrap font-mono text-sm text-gray-600">{record.duration}</td>
                                 <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-800">{record.topic || 'General'}</td>
                                 <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
