@@ -1,6 +1,5 @@
 import os
 import io
-import json
 import base64
 import logging
 import numpy as np
@@ -9,14 +8,12 @@ import librosa
 import tensorflow as tf
 from flask import Flask, request, jsonify
 from joblib import load
-from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.base import BaseEstimator, TransformerMixin
 
 # --- Yapılandırma ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-SPEAKER_DB_FILE = os.path.join(BASE_DIR, 'speakers_db.json')
 SENTIMENT_MODEL_DIR = os.path.join(BASE_DIR, 'models', 'sentiment')
 RECOGNITION_MODEL_DIR = os.path.join(BASE_DIR, 'models', 'recognition')
 
@@ -46,10 +43,6 @@ class AudioService:
         self.sentiment_ready = False
         self.recognition_ready = False
 
-        # Veritabanı
-        self.speaker_vectors = {}
-        self.load_speaker_db()
-
         # Modelleri Yükle
         self._load_sentiment_models()
         self._load_recognition_models()
@@ -74,39 +67,13 @@ class AudioService:
     def _load_recognition_models(self):
         try:
             logging.info(f"Recognition modelleri yükleniyor: {RECOGNITION_MODEL_DIR}")
+            # TPOT Modeli ve ilgili dönüştürücüler
             self.rec_scaler = load(os.path.join(RECOGNITION_MODEL_DIR, 'scaler.pkl'))
             self.rec_selector = load(os.path.join(RECOGNITION_MODEL_DIR, 'selector.pkl'))
+            self.rec_model = load(os.path.join(RECOGNITION_MODEL_DIR, 'tpot_best.pkl'))
             self.recognition_ready = True
         except Exception as e:
             logging.error(f"Recognition model hatası: {e}")
-
-    def load_speaker_db(self):
-        if os.path.exists(SPEAKER_DB_FILE):
-            try:
-                with open(SPEAKER_DB_FILE, 'r') as f:
-                    self.speaker_vectors = json.load(f)
-            except Exception:
-                self.speaker_vectors = {}
-        else:
-            self.speaker_vectors = {}
-
-    def save_speaker_db(self):
-        try:
-            os.makedirs(os.path.dirname(SPEAKER_DB_FILE), exist_ok=True)
-            with open(SPEAKER_DB_FILE, 'w') as f:
-                json.dump(self.speaker_vectors, f)
-        except Exception as e:
-            logging.error(f"DB kayıt hatası: {e}")
-
-    def add_speaker(self, user_id, vector):
-        if user_id not in self.speaker_vectors:
-            self.speaker_vectors[user_id] = []
-
-        if isinstance(vector, np.ndarray):
-            vector = vector.tolist()
-
-        self.speaker_vectors[user_id].append(vector)
-        self.save_speaker_db()
 
     # --- Feature Extraction (Birleştirilmiş) ---
     def extract_features(self, wav_bytes, sr=None):
@@ -173,7 +140,7 @@ class AudioService:
                 ['energy']
         )
 
-    # --- Tahmin Mantığı (Sınıf içine taşındı) ---
+    # --- Tahmin Mantığı ---
     def predict_sentiment(self, raw_features):
         if not self.sentiment_ready: return "ModelNotLoaded"
         try:
@@ -193,61 +160,41 @@ class AudioService:
             logging.error(f"Voice sentiment error: {e}")
             return "Error"
 
-    def get_recognition_vector(self, raw_features):
-        if not self.recognition_ready: return raw_features
+    def identify_speaker(self, raw_features):
+        if not self.recognition_ready: return "Unknown", 0.0
+
         try:
+            # 1. Ham özellikleri boyutlandır (1, n_features)
             X = raw_features.reshape(1, -1)
+
+            # 2. Scaler ve Selector işlemlerini uygula
             X_scaled = self.rec_scaler.transform(X)
-            return self.rec_selector.transform(X_scaled)[0]
-        except Exception:
-            return raw_features
+            X_selected = self.rec_selector.transform(X_scaled)
 
-    def identify_speaker(self, processed_vector):
-        if not self.speaker_vectors: return "Unknown", 0.0
+            # 3. Model Tahmini
+            if hasattr(self.rec_model, "predict_proba"):
+                proba = self.rec_model.predict_proba(X_selected)[0]
+                class_labels = self.rec_model.classes_
 
-        best_user = "Unknown"
-        best_score = -1.0
-        input_vec = processed_vector.reshape(1, -1)
+                # En yüksek olasılığa sahip sınıfı bul
+                best_idx = np.argmax(proba)
+                best_label = class_labels[best_idx]
+                best_prob = float(proba[best_idx])
 
-        for user_id, vectors_list in self.speaker_vectors.items():
-            db_vectors = np.array(vectors_list)
-            # Boyut uyuşmazlığı kontrolü
-            if db_vectors.shape[1] != input_vec.shape[1]: continue
+                return str(best_label), best_prob
+            else:
+                # Eger predict_proba desteklenmiyorsa düz tahmin al
+                y_pred = self.rec_model.predict(X_selected)
+                return str(y_pred[0]), 1.0
 
-            similarities = cosine_similarity(input_vec, db_vectors)
-            max_sim = np.max(similarities)
-
-            if max_sim > best_score:
-                best_score = max_sim
-                best_user = user_id
-
-        return best_user, float(best_score)
+        except Exception as e:
+            logging.error(f"Speaker prediction error: {e}")
+            return "Error", 0.0
 
 # Servis örneğini oluştur
 audio_service = AudioService()
 
 # --- Endpointler ---
-
-@app.route('/identificate', methods=['POST'])
-def identificate_user():
-    try:
-        data = request.json
-        user_id = data.get('speaker')
-        wav_b64 = data.get('wav_file')
-
-        if not user_id or not wav_b64:
-            return jsonify({"error": "Missing speaker or wav_file"}), 400
-
-        wav_bytes = base64.b64decode(wav_b64)
-
-        # Tek fonksiyon ile özellik çıkarma
-        raw_features = audio_service.extract_features(wav_bytes)
-        processed_vector = audio_service.get_recognition_vector(raw_features)
-
-        audio_service.add_speaker(user_id, processed_vector)
-        return jsonify({"status": "success", "message": f"User {user_id} saved."})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 @app.route('/analyze_audio', methods=['POST'])
 def analyze_audio():
@@ -266,14 +213,13 @@ def analyze_audio():
         # 2. Duygu Analizi
         voice_sentiment = audio_service.predict_sentiment(raw_features)
 
-        # 3. Konuşmacı Tanıma
-        rec_vector = audio_service.get_recognition_vector(raw_features)
-        speaker_id, speaker_score = audio_service.identify_speaker(rec_vector)
+        # 3. Konuşmacı Tanıma (TPOT Modeli İle)
+        speaker_id, confidence_score = audio_service.identify_speaker(raw_features)
 
         return jsonify({
             "voice_sentiment": voice_sentiment,
             "speaker": speaker_id,
-            "similarity_score": speaker_score,
+            "similarity_score": confidence_score,
             "status": "success"
         })
     except Exception as e:
