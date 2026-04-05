@@ -1,0 +1,67 @@
+version: '3.8'
+
+services:
+  gateway:
+    build:
+      context: ./gateway
+    ports:
+      - "8080:8080"
+    volumes:
+      - sqlite_data:/app/database
+    depends_on:
+      - text_analyze
+      - voice_analyze
+      - whisperx
+    networks:
+      - app_network
+
+  whisperx:
+    build:
+      context: ./whisperX
+    ports:
+      - "5000:5000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [ gpu ]
+    networks:
+      - app_network
+
+  text_analyze:
+    build:
+      context: ./text_analyze
+    ports:
+      - "5002:5002"
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    networks:
+      - app_network
+
+  voice_analyze:
+    build:
+      context: ./voice_analyze
+    ports:
+      - "5001:5001"
+    networks:
+      - app_network
+
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    networks:
+      - app_network
+
+volumes:
+  sqlite_data:
+
+networks:
+  app_network:
+    driver: bridge

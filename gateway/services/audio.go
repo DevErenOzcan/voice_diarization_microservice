@@ -14,9 +14,9 @@ import (
 )
 
 const (
-	WhisperServiceURL = "http://localhost:5000/"
-	AudioServiceURL   = "http://localhost:5001/" // Audio Service (Ses İşleme)
-	TextServiceURL    = "http://localhost:5002/" // Text Service (Metin İşleme)
+	WhisperServiceURL = "http://whisperx:5000/"
+	AudioServiceURL   = "http://voice_analyze:5001/" // Audio Service (Ses İşleme)
+	TextServiceURL    = "http://text_analyze:5002/"  // Text Service (Metin İşleme)
 )
 
 var httpClient = &http.Client{Timeout: 60 * time.Second}
